@@ -518,11 +518,13 @@ class DashboardView(discord.ui.View):
 # ---------------------------------------------------------
 class MemoModal(discord.ui.Modal, title='完了メモ'):
     memo = discord.ui.TextInput(label='一言メモ（任意）', style=discord.TextStyle.short, required=False)
-    def __init__(self, task_name, start_time, view_item):
+    # 修正: original_messageを受け取るように変更
+    def __init__(self, task_name, start_time, view_item, original_message):
         super().__init__()
         self.task_name = task_name
         self.start_time = start_time
         self.view_item = view_item
+        self.original_message = original_message
         
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -554,7 +556,10 @@ class MemoModal(discord.ui.Modal, title='完了メモ'):
         
         for child in self.view_item.children:
             child.disabled = True
-        await self.view_item.message.edit(view=self.view_item)
+            
+        # 修正: 保存しておいたメッセージを使って編集
+        await self.original_message.edit(view=self.view_item)
+        
         await interaction.followup.send(embed=embed)
 
 class FinishTaskView(discord.ui.View):
@@ -567,7 +572,8 @@ class FinishTaskView(discord.ui.View):
             time_str = embed.footer.text.replace("開始時刻: ", "")
             start_time = datetime.datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
             task_name = embed.title.replace("🚀 スタート: ", "")
-            await interaction.response.send_modal(MemoModal(task_name, start_time, self))
+            # 修正: interaction.messageを渡す
+            await interaction.response.send_modal(MemoModal(task_name, start_time, self, interaction.message))
         except:
             await interaction.response.send_message("エラー: タスク情報を読み取れませんでした。", ephemeral=True)
 
