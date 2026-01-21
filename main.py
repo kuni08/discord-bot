@@ -46,6 +46,9 @@ CH_TIMELINE = "📜タイムライン"
 CH_GOALS = "🎯目標管理"
 CAT_NAME = "MY LIFE LOG"
 
+# 日本時間（JST）の定義
+JST = datetime.timezone(datetime.timedelta(hours=9))
+
 PRAISE_MESSAGES = [
     "お疲れ様でした！素晴らしい集中力です✨",
     "ナイス！その調子でいきましょう🚀",
@@ -84,16 +87,17 @@ client = commands.Bot(command_prefix='!', intents=intents)
 class DataManager:
     def __init__(self, bot):
         self.bot = bot
-        # デフォルトタスク
+        # デフォルトタスク（絵文字なし、ジャンル別色分け）
         self.default_tasks = [
-            {"name": "📚 勉強", "style": "primary"},
-            {"name": "📖 読書", "style": "primary"},
-            {"name": "🏃 運動", "style": "success"},
-            {"name": "🍽️ 食事", "style": "success"},
-            {"name": "🛁 風呂", "style": "primary"},
-            {"name": "🚶 移動", "style": "secondary"},
-            {"name": "💻 PC作業", "style": "primary"},
-            {"name": "🎮 ゲーム", "style": "success"}
+            {"name": "勉強", "style": "primary"},    # 青: 集中
+            {"name": "読書", "style": "primary"},    # 青: 集中
+            {"name": "運動", "style": "success"},    # 緑: 健康・活動
+            {"name": "食事", "style": "success"},    # 緑: 生活
+            {"name": "風呂", "style": "primary"},    # 青: 生活ルーチン
+            {"name": "コーヒー", "style": "secondary"}, # 灰: 休憩
+            {"name": "移動", "style": "secondary"},   # 灰: その他
+            {"name": "PC作業", "style": "primary"},   # 青: 作業
+            {"name": "ゲーム", "style": "success"}    # 緑: 娯楽
         ]
 
     async def get_channel_by_name(self, guild, name, category=None, hidden=False):
@@ -189,7 +193,7 @@ class DataManager:
         if log_data.get('memo'):
             embed.add_field(name="📝 メモ", value=log_data['memo'], inline=False)
         embed.set_footer(text="Logged via MyLifeLog")
-        embed.timestamp = datetime.datetime.now()
+        embed.timestamp = datetime.datetime.now(JST)
         
         await timeline_ch.send(embed=embed)
 
@@ -254,14 +258,19 @@ class GraphGenerator:
         df = pd.DataFrame(logs)
         if df.empty: return None, None
         
-        df['date_obj'] = pd.to_datetime(df['date'])
+        # JST考慮
+        df['date_obj'] = pd.to_datetime(df['date']).dt.tz_localize(None) # 比較のためtzなしに統一
+        
+        # timestampがあれば優先して使い、JSTに変換
         if 'timestamp' in df.columns:
-             df['timestamp_obj'] = pd.to_datetime(df['timestamp'])
+             # 文字列から変換し、JSTに合わせる
+             df['ts_obj'] = pd.to_datetime(df['timestamp']).dt.tz_convert(JST).dt.tz_localize(None)
         else:
-             df['timestamp_obj'] = df['date_obj']
+             df['ts_obj'] = df['date_obj']
 
-        cutoff_date = pd.Timestamp.now() - pd.Timedelta(days=days)
-        df = df[df['date_obj'] >= cutoff_date]
+        now = datetime.datetime.now(JST).replace(tzinfo=None)
+        cutoff_date = now - pd.Timedelta(days=days)
+        df = df[df['ts_obj'] >= cutoff_date]
         
         if df.empty: return None, None
 
@@ -305,8 +314,8 @@ class GraphGenerator:
             plt.close()
 
         plt.figure(figsize=(10, 5))
-        df['weekday'] = df['timestamp_obj'].dt.weekday
-        df['hour'] = df['timestamp_obj'].dt.hour
+        df['weekday'] = df['ts_obj'].dt.weekday
+        df['hour'] = df['ts_obj'].dt.hour
         heatmap_data = df.pivot_table(index='weekday', columns='hour', values='duration_min', aggfunc='count', fill_value=0)
         heatmap_data = heatmap_data.reindex(index=range(7), columns=range(24), fill_value=0)
         
@@ -343,12 +352,13 @@ class GraphGenerator:
         if df.empty: return None
 
         if 'timestamp' in df.columns:
-             df['end_time'] = pd.to_datetime(df['timestamp'])
+             # UTC -> JST -> tzなし
+             df['end_time'] = pd.to_datetime(df['timestamp']).dt.tz_convert(JST).dt.tz_localize(None)
         else:
              df['end_time'] = pd.to_datetime(df['date'])
 
         if target_date is None:
-            target_date = datetime.date.today()
+            target_date = datetime.datetime.now(JST).date()
         
         df['date_only'] = df['end_time'].dt.date
         df = df[df['date_only'] == target_date].copy()
@@ -409,13 +419,14 @@ class GraphGenerator:
         if df.empty: return []
         
         if 'timestamp' in df.columns:
-            df['ts_obj'] = pd.to_datetime(df['timestamp'])
+            # JST変換
+            df['ts_obj'] = pd.to_datetime(df['timestamp']).dt.tz_convert(JST).dt.tz_localize(None)
         else:
             df['ts_obj'] = pd.to_datetime(df['date'])
 
-        now = pd.Timestamp.now()
-        today = now.normalize()
-        start_of_week = today - pd.Timedelta(days=today.dayofweek)
+        now = datetime.datetime.now(JST).replace(tzinfo=None)
+        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_of_week = today - pd.Timedelta(days=today.weekday())
         start_of_month = today.replace(day=1)
         
         progress_data = []
@@ -447,7 +458,11 @@ class GraphGenerator:
                     label_period = "今月"
                 
                 elif period == "custom" and created_at_str:
-                    start_date = pd.to_datetime(created_at_str)
+                    try:
+                        start_date = pd.to_datetime(created_at_str).tz_localize(None) # UTCかもだが簡易化
+                    except:
+                        start_date = today # fallback
+                        
                     end_date = start_date + pd.Timedelta(days=custom_days)
                     current = df[(df['task'] == task_name) & (df['ts_obj'] >= start_date) & (df['ts_obj'] <= end_date)]['duration_min'].sum()
                     days_left = (end_date - now).days
@@ -487,7 +502,6 @@ class GoalManagePanel(discord.ui.View):
             await interaction.followup.send("現在設定されている目標はありません。", ephemeral=True)
             return
         
-        # 目標リストのEmbed作成
         embed = discord.Embed(title="🎯 目標リスト", description="下部のメニューから目標を選択して編集・削除ができます。", color=discord.Color.blue())
         select_options = []
         
@@ -508,7 +522,6 @@ class GoalManagePanel(discord.ui.View):
                 
                 embed.add_field(name=task, value=f"・{p_text}あたり {target}分", inline=False)
                 
-                # SelectMenuの制限(25個)内であれば追加
                 if len(select_options) < 25:
                     select_options.append(discord.SelectOption(label=label[:100], value=value))
 
@@ -520,6 +533,31 @@ class GoalManagePanel(discord.ui.View):
         await interaction.response.defer()
         dm = DataManager(self.bot)
         await dm.refresh_goals_panel(interaction.guild)
+
+    @discord.ui.button(label="👀 目標一覧", style=discord.ButtonStyle.secondary, custom_id="goal_panel_list", row=1)
+    async def list_goals(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        dm = DataManager(self.bot)
+        goals = await dm.load_goals(interaction.guild)
+        
+        if not goals:
+            await interaction.followup.send("設定なし", ephemeral=True)
+            return
+        embed = discord.Embed(title="🎯 目標設定一覧", color=discord.Color.blue())
+        for task, goal_list in goals.items():
+            if isinstance(goal_list, dict): goal_list = [goal_list]
+            value_text = ""
+            for info in goal_list:
+                p_code = info.get('period')
+                target = info.get('target')
+                p_text = "不明"
+                if p_code == 'daily': p_text = "1日"
+                elif p_code == 'weekly': p_text = "1週間"
+                elif p_code == 'monthly': p_text = "1ヶ月"
+                elif p_code == 'custom': p_text = f"{info.get('custom_days')}日間"
+                value_text += f"・{p_text} {target}分\n"
+            if value_text: embed.add_field(name=task, value=value_text, inline=False)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 # --- 目標リスト操作View (編集・削除) ---
 class GoalListActionView(discord.ui.View):
@@ -537,13 +575,10 @@ class GoalListSelect(discord.ui.Select):
         self.bot = bot
 
     async def callback(self, interaction: discord.Interaction):
-        # value format: "TaskName|Index"
         selected_val = self.values[0]
         try:
             task_name, index_str = selected_val.rsplit('|', 1)
             index = int(index_str)
-            
-            # アクション選択Viewを表示
             await interaction.response.send_message(
                 f"**{task_name}** の目標を選択しました。操作を選んでください。",
                 view=GoalActionView(self.bot, task_name, index),
@@ -561,8 +596,6 @@ class GoalActionView(discord.ui.View):
 
     @discord.ui.button(label="✏️ 編集", style=discord.ButtonStyle.primary)
     async def edit(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 既存の値を取得してModalを出したいが、Modalに初期値を入れるのは複雑なため
-        # 新規作成と同じModalを出し、内部で上書き処理を行う
         await interaction.response.send_modal(GoalInputModal(self.bot, self.task_name, self.index))
 
     @discord.ui.button(label="🗑️ 削除", style=discord.ButtonStyle.danger)
@@ -602,7 +635,6 @@ class GoalAddSelect(discord.ui.Select):
         await interaction.response.send_modal(GoalInputModal(self.bot, selected_name))
 
 class GoalInputModal(discord.ui.Modal, title="目標設定"):
-    # 柔軟な入力に対応するため、期間のバリデーションを強化
     target_time = discord.ui.TextInput(label="目標時間 (分)", placeholder="例: 60")
     period_select = discord.ui.TextInput(label="期間 (1日, 1週間, 1ヶ月, カスタム)", placeholder="1日")
     custom_days = discord.ui.TextInput(label="カスタム日数 (カスタムの場合のみ)", placeholder="例: 20", required=False)
@@ -611,7 +643,7 @@ class GoalInputModal(discord.ui.Modal, title="目標設定"):
         super().__init__()
         self.bot = bot
         self.task_name = task_name
-        self.edit_index = edit_index # 編集モードの場合のインデックス
+        self.edit_index = edit_index
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -619,7 +651,6 @@ class GoalInputModal(discord.ui.Modal, title="目標設定"):
             target = int(self.target_time.value)
             p_val = self.period_select.value.strip().lower()
             
-            # 期間判定ロジック強化
             period = None
             if p_val in ['d', 'day', 'daily', '1日', '日', '毎日']: period = 'daily'
             elif p_val in ['w', 'week', 'weekly', '1週間', '週', '毎週']: period = 'weekly'
@@ -633,7 +664,6 @@ class GoalInputModal(discord.ui.Modal, title="目標設定"):
             dm = DataManager(self.bot)
             goals = await dm.load_goals(interaction.guild)
             
-            # データ構築
             goal_data = {
                 "target": target,
                 "period": period,
@@ -649,24 +679,20 @@ class GoalInputModal(discord.ui.Modal, title="目標設定"):
                     await interaction.followup.send("⚠️ 日数は数字で入力してください。", ephemeral=True)
                     return
 
-            # 保存処理
             if self.task_name not in goals:
                 goals[self.task_name] = []
             elif isinstance(goals[self.task_name], dict):
                 goals[self.task_name] = [goals[self.task_name]]
             
             if self.edit_index is not None and 0 <= self.edit_index < len(goals[self.task_name]):
-                # 編集（上書き）
                 goals[self.task_name][self.edit_index] = goal_data
                 action_text = "更新"
             else:
-                # 新規追加
                 goals[self.task_name].append(goal_data)
                 action_text = "追加"
             
             await dm.save_goals(interaction.guild, goals)
             await dm.refresh_goals_panel(interaction.guild)
-            
             await interaction.followup.send(f"✅ **{self.task_name}** の目標を{action_text}しました。", ephemeral=True)
             
         except ValueError:
@@ -789,6 +815,30 @@ class TaskManageView(discord.ui.View):
     async def edit_all_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         default_text = "\n".join([t["name"] for t in self.tasks])
         await interaction.response.send_modal(EditAllModal(self, default_text))
+
+    @discord.ui.button(label="👀 目標一覧", style=discord.ButtonStyle.secondary, row=1)
+    async def goal_list_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        dm = DataManager(self.bot)
+        goals = await dm.load_goals(interaction.guild)
+        if not goals:
+            await interaction.followup.send("設定なし", ephemeral=True)
+            return
+        embed = discord.Embed(title="🎯 目標設定一覧", color=discord.Color.blue())
+        for task, goal_list in goals.items():
+            if isinstance(goal_list, dict): goal_list = [goal_list]
+            value_text = ""
+            for info in goal_list:
+                p_code = info.get('period')
+                target = info.get('target')
+                p_text = "不明"
+                if p_code == 'daily': p_text = "1日"
+                elif p_code == 'weekly': p_text = "1週間"
+                elif p_code == 'monthly': p_text = "1ヶ月"
+                elif p_code == 'custom': p_text = f"{info.get('custom_days')}日間"
+                value_text += f"・{p_text} {target}分\n"
+            if value_text: embed.add_field(name=task, value=value_text, inline=False)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ---------------------------------------------------------
 # その他モーダル・View (省略なし)
@@ -926,11 +976,15 @@ class FreeTaskStartModal(discord.ui.Modal, title="自由入力でスタート"):
     task_name = discord.ui.TextInput(label="今からやることは？", placeholder="例: 電球交換")
     async def on_submit(self, interaction: discord.Interaction):
         selected = self.task_name.value
-        now = datetime.datetime.now()
+        now = datetime.datetime.now(JST)
         start_str = now.strftime("%Y-%m-%d %H:%M:%S")
         timestamp = int(now.timestamp())
-        embed = discord.Embed(title=f"🚀 スタート: {selected}", description=f"経過: <t:{timestamp}:R>", color=discord.Color.blue())
-        embed.set_footer(text=f"開始時刻: {start_str}")
+        
+        # タイマー表示のUI改善
+        description = f"**{start_str}**\n経過: <t:{timestamp}:R>"
+        embed = discord.Embed(title=f"🚀 スタート: {selected}", description=description, color=discord.Color.blue())
+        # embed.set_footer(text=f"開始時刻: {start_str}")
+        
         await interaction.response.send_message(embed=embed, view=FinishTaskView())
 
 class TaskButton(discord.ui.Button):
@@ -938,25 +992,34 @@ class TaskButton(discord.ui.Button):
         style = BUTTON_STYLES.get(style_name, discord.ButtonStyle.secondary)
         super().__init__(label=task_name[:80], style=style, row=row)
         self.task_name = task_name
+
     async def callback(self, interaction: discord.Interaction):
-        now = datetime.datetime.now()
+        now = datetime.datetime.now(JST)
         start_str = now.strftime("%Y-%m-%d %H:%M:%S")
         timestamp = int(now.timestamp())
-        embed = discord.Embed(title=f"🚀 スタート: {self.task_name}", description=f"経過: <t:{timestamp}:R>", color=discord.Color.blue())
-        embed.set_footer(text=f"開始時刻: {start_str}")
+        
+        # タイマー表示のUI改善
+        description = f"**{start_str}**\n経過: <t:{timestamp}:R>"
+        embed = discord.Embed(title=f"🚀 スタート: {self.task_name}", description=description, color=discord.Color.blue())
+        # embed.set_footer(text=f"開始時刻: {start_str}")
+        
         await interaction.response.send_message(embed=embed, view=FinishTaskView())
 
 class OverflowTaskSelect(discord.ui.Select):
     def __init__(self, tasks, row=3):
         options = [discord.SelectOption(label=t["name"][:100]) for t in tasks]
         super().__init__(placeholder="⏬ その他のタスク...", options=options, custom_id="dashboard_overflow_select", row=row)
+    
     async def callback(self, interaction: discord.Interaction):
         selected = self.values[0]
-        now = datetime.datetime.now()
+        now = datetime.datetime.now(JST)
         start_str = now.strftime("%Y-%m-%d %H:%M:%S")
         timestamp = int(now.timestamp())
-        embed = discord.Embed(title=f"🚀 スタート: {selected}", description=f"経過: <t:{timestamp}:R>", color=discord.Color.blue())
-        embed.set_footer(text=f"開始時刻: {start_str}")
+        
+        # タイマー表示のUI改善
+        description = f"**{start_str}**\n経過: <t:{timestamp}:R>"
+        embed = discord.Embed(title=f"🚀 スタート: {selected}", description=description, color=discord.Color.blue())
+        
         await interaction.response.send_message(embed=embed, view=FinishTaskView())
 
 class MemoModal(discord.ui.Modal, title='完了メモ'):
@@ -970,8 +1033,19 @@ class MemoModal(discord.ui.Modal, title='完了メモ'):
         
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        end_time = datetime.datetime.now()
-        duration = end_time - self.start_time
+
+        # UTC -> JST
+        end_time = datetime.datetime.now(JST)
+        
+        # start_time は naive (JSTとして扱う) か aware (JST) なので
+        # 単純に引き算できるように調整
+        if self.start_time.tzinfo is None:
+             # start_timeがnaiveならJSTと仮定してawareにする
+             start_aware = self.start_time.replace(tzinfo=JST)
+        else:
+             start_aware = self.start_time
+
+        duration = end_time - start_aware
         minutes = int(duration.total_seconds() // 60)
         seconds = int(duration.total_seconds() % 60)
         
@@ -983,6 +1057,7 @@ class MemoModal(discord.ui.Modal, title='完了メモ'):
             "date": end_time.strftime("%Y-%m-%d"),
             "timestamp": end_time.isoformat()
         }
+        
         dm = DataManager(client)
         await dm.save_log(interaction.guild, log_data)
 
@@ -990,11 +1065,13 @@ class MemoModal(discord.ui.Modal, title='完了メモ'):
         embed = discord.Embed(title=f"✅ {praise}", color=discord.Color.gold())
         embed.add_field(name="内容", value=self.task_name)
         embed.add_field(name="時間", value=log_data['duration_str'])
+        
         if self.memo.value:
             embed.add_field(name="📝 メモ", value=self.memo.value, inline=False)
         
         for child in self.view_item.children:
             child.disabled = True
+            
         await self.original_message.edit(view=self.view_item)
         await interaction.followup.send(embed=embed)
 
@@ -1005,12 +1082,27 @@ class FinishTaskView(discord.ui.View):
     async def finish(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = interaction.message.embeds[0]
         try:
-            time_str = embed.footer.text.replace("開始時刻: ", "")
-            start_time = datetime.datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
+            # embed.description からタイムスタンプを取得する方式に変更
+            # description format: "**2024-01-01 12:00:00**\n経過: <t:1234567890:R>"
+            
+            # descriptionの1行目を取得
+            lines = embed.description.split('\n')
+            time_str = lines[0].replace('**', '').strip()
+            
+            # strptimeでJSTとして解析
+            start_time = datetime.datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=JST)
+            
             task_name = embed.title.replace("🚀 スタート: ", "")
             await interaction.response.send_modal(MemoModal(task_name, start_time, self, interaction.message))
         except:
-            await interaction.response.send_message("エラー", ephemeral=True)
+            # 旧形式（フッター）へのフォールバック
+            try:
+                time_str = embed.footer.text.replace("開始時刻: ", "")
+                start_time = datetime.datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=JST)
+                task_name = embed.title.replace("🚀 スタート: ", "")
+                await interaction.response.send_modal(MemoModal(task_name, start_time, self, interaction.message))
+            except:
+                await interaction.response.send_message("エラー: タスク情報を読み取れませんでした。", ephemeral=True)
 
 # ---------------------------------------------------------
 # 7. 起動 & コマンド定義
@@ -1022,32 +1114,54 @@ async def on_ready():
     client.add_view(FinishTaskView())
     client.add_view(DashboardView(client, [{"name": "Loading...", "style": "secondary"}]))
 
-@client.tree.command(name="setup_server", description="サーバー構成を自動セットアップします")
+@client.tree.command(name="setup_server", description="【推奨】サーバーのチャンネル構成を自動セットアップします")
 async def setup_server(interaction: discord.Interaction):
     await interaction.response.defer()
     guild = interaction.guild
-    dm = DataManager(client)
     
     category = discord.utils.get(guild.categories, name=CAT_NAME)
     if not category:
         category = await guild.create_category(CAT_NAME)
 
-    await dm.get_channel_by_name(guild, CH_DASHBOARD, category)
-    await dm.get_channel_by_name(guild, CH_TIMELINE, category)
-    await dm.get_channel_by_name(guild, CH_GOALS, category)
-    await dm.get_channel_by_name(guild, CH_DATA, category, hidden=True)
+    dash_ch = discord.utils.get(guild.text_channels, name=CH_DASHBOARD)
+    if not dash_ch:
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(send_messages=False),
+            guild.me: discord.PermissionOverwrite(send_messages=True)
+        }
+        dash_ch = await guild.create_text_channel(CH_DASHBOARD, category=category, overwrites=overwrites)
     
+    time_ch = discord.utils.get(guild.text_channels, name=CH_TIMELINE)
+    if not time_ch:
+        time_ch = await guild.create_text_channel(CH_TIMELINE, category=category)
+
+    data_ch = discord.utils.get(guild.text_channels, name=CH_DATA)
+    if not data_ch:
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            guild.me: discord.PermissionOverwrite(read_messages=True)
+        }
+        data_ch = await guild.create_text_channel(CH_DATA, category=category, overwrites=overwrites)
+    
+    goals_ch = discord.utils.get(guild.text_channels, name=CH_GOALS)
+    if not goals_ch:
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(send_messages=False),
+            guild.me: discord.PermissionOverwrite(send_messages=True)
+        }
+        goals_ch = await guild.create_text_channel(CH_GOALS, category=category, overwrites=overwrites)
+
+    dm = DataManager(client)
     tasks = await dm.load_tasks(guild)
     
-    dash_ch = await dm.get_channel_by_name(guild, CH_DASHBOARD)
     await dash_ch.purge(limit=5)
     await dash_ch.send("行動宣言パネル", view=DashboardView(client, tasks))
 
     await dm.refresh_goals_panel(guild)
 
-    await interaction.followup.send("✅ サーバー構成を最適化しました！", ephemeral=True)
+    await interaction.followup.send("✅ サーバー構成を最適化しました！\n`🎮ダッシュボード` チャンネルから操作を開始してください。", ephemeral=True)
 
-@client.tree.command(name="setup", description="パネルを設置します")
+@client.tree.command(name="setup", description="現在のチャンネルにパネルを設置します")
 async def setup(interaction: discord.Interaction):
     await interaction.response.defer()
     dm = DataManager(client)
