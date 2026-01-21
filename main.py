@@ -7,12 +7,13 @@ import json
 import asyncio
 from flask import Flask
 from threading import Thread
-from collections import defaultdict
+from collections import defaultdict, Counter
 import io
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import matplotlib.font_manager as fm
 import pandas as pd
+import random
 
 # ---------------------------------------------------------
 # 1. サーバー維持機能
@@ -36,6 +37,18 @@ def keep_alive():
 # ---------------------------------------------------------
 TOKEN = os.getenv('DISCORD_TOKEN')
 DATA_CHANNEL_NAME = "mylifelog-data"
+
+# 褒め言葉リスト
+PRAISE_MESSAGES = [
+    "お疲れ様でした！素晴らしい集中力です✨",
+    "ナイス！その調子でいきましょう🚀",
+    "目標達成おめでとうございます！🎉",
+    "よく頑張りましたね！ゆっくり休んでください🍵",
+    "今日のあなたは輝いています！✨",
+    "継続は力なり。さすがです！💪",
+    "完璧です！次のタスクもこの調子で！🔥",
+    "えらい！すごすぎる！💯",
+]
 
 # 日本語フォントの設定
 FONT_PATH = "font.ttf"
@@ -117,6 +130,15 @@ class DataManager:
             except: continue
         return logs
 
+    async def get_frequent_tasks(self, guild, limit=20):
+        """よく使うタスク順に並べ替えて返す"""
+        logs = await self.fetch_logs(guild, limit=300)
+        
+        # デフォルトタスクの順序を維持しつつ、頻度情報を加味したいが、
+        # ここではシンプルに「登録されているタスクリスト」を正とする。
+        # (頻度順に並べ替えたい場合はここを調整)
+        return None 
+
 # ---------------------------------------------------------
 # 4. グラフ生成クラス
 # ---------------------------------------------------------
@@ -136,7 +158,6 @@ class GraphGenerator:
         images = {}
         fp = fm.FontProperties(fname=FONT_PATH, size=14) if os.path.exists(FONT_PATH) else None
 
-        # 円グラフ
         plt.figure(figsize=(10, 6))
         task_sum = df.groupby('task')['duration_min'].sum()
         if not task_sum.empty:
@@ -156,7 +177,6 @@ class GraphGenerator:
             images['pie'] = buf_pie
             plt.close()
 
-        # 積み上げ棒グラフ
         plt.figure(figsize=(12, 6))
         pivot_df = df.pivot_table(index='date', columns='task', values='duration_min', aggfunc='sum', fill_value=0)
         if not pivot_df.empty:
@@ -289,10 +309,33 @@ class EditAllModal(discord.ui.Modal, title="並び替え・一括編集"):
 
 class FreeTaskStartModal(discord.ui.Modal, title="自由入力でスタート"):
     task_name = discord.ui.TextInput(label="今からやることは？", placeholder="例: 電球交換、ゴミ捨て")
-    
     async def on_submit(self, interaction: discord.Interaction):
-        # 自由入力されたタスク名で開始
         selected = self.task_name.value
+        start = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        embed = discord.Embed(title=f"🚀 スタート: {selected}", color=discord.Color.blue())
+        embed.set_footer(text=f"開始時刻: {start}")
+        await interaction.response.send_message(embed=embed, view=FinishTaskView())
+
+# タスクボタン（タイル状に配置される個別のボタン）
+class TaskButton(discord.ui.Button):
+    def __init__(self, task_name, style=discord.ButtonStyle.secondary):
+        super().__init__(label=task_name[:80], style=style) # Discordの制限考慮
+        self.task_name = task_name
+
+    async def callback(self, interaction: discord.Interaction):
+        start = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        embed = discord.Embed(title=f"🚀 スタート: {self.task_name}", color=discord.Color.blue())
+        embed.set_footer(text=f"開始時刻: {start}")
+        await interaction.response.send_message(embed=embed, view=FinishTaskView())
+
+# あふれたタスク用のセレクトメニュー
+class OverflowTaskSelect(discord.ui.Select):
+    def __init__(self, tasks):
+        options = [discord.SelectOption(label=t[:100]) for t in tasks]
+        super().__init__(placeholder="⏬ その他のタスク...", options=options, custom_id="dashboard_overflow_select")
+    
+    async def callback(self, interaction: discord.Interaction):
+        selected = self.values[0]
         start = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         embed = discord.Embed(title=f"🚀 スタート: {selected}", color=discord.Color.blue())
         embed.set_footer(text=f"開始時刻: {start}")
@@ -302,15 +345,54 @@ class DashboardView(discord.ui.View):
     def __init__(self, bot, tasks):
         super().__init__(timeout=None)
         self.bot = bot
-        self.add_item(TaskSelect(tasks))
+        
+        # ボタンのスタイルのパターン（カラフルにするため）
+        styles = [
+            discord.ButtonStyle.primary,   # 青
+            discord.ButtonStyle.secondary, # グレー
+            discord.ButtonStyle.success,   # 緑
+            # Danger(赤)は「削除」っぽく見えるのであまり使わない方が良いが、アクセントとして入れるならあり
+            # discord.ButtonStyle.danger
+        ]
 
-    @discord.ui.button(label="📝 自由入力", style=discord.ButtonStyle.success, custom_id="dashboard_free_input", row=1)
-    async def free_input_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 自由入力モーダルを表示
+        # 配置制限の計算
+        # DiscordのActionRowは5つまで。1行に5個ボタンを置ける。
+        # 最終行(row=4)は機能ボタン用に空けておく。
+        # SelectMenuを使う場合は1行消費する。
+        # 最大: 4行 x 5個 = 20個のタスクボタンが限界。
+        # もしタスクが多すぎる場合は、1行分をSelectMenuに回す。
+        
+        max_buttons = 15 # 安全策で3行分(15個)までボタンにする
+        main_tasks = tasks[:max_buttons]
+        overflow_tasks = tasks[max_buttons:]
+
+        # メインのタスクをボタンとして配置
+        for i, task in enumerate(main_tasks):
+            # 色をローテーション
+            style = styles[i % len(styles)]
+            self.add_item(TaskButton(task, style=style))
+
+        # あふれたタスクがある場合はSelectMenuを追加
+        if overflow_tasks:
+            self.add_item(OverflowTaskSelect(overflow_tasks))
+
+        # 機能ボタン群 (row=4 に固定)
+        self.add_item(self.create_func_btn("📝 自由入力", discord.ButtonStyle.secondary, "free_input", self.free_input_btn))
+        self.add_item(self.create_func_btn("📊 レポート", discord.ButtonStyle.primary, "report", self.report_btn))
+        self.add_item(self.create_func_btn("⚙️ 設定", discord.ButtonStyle.secondary, "manage", self.manage_btn))
+        self.add_item(self.create_func_btn("📂 CSV", discord.ButtonStyle.secondary, "csv", self.csv_btn))
+        self.add_item(self.create_func_btn("🔄 再設置", discord.ButtonStyle.gray, "refresh", self.refresh_btn))
+
+    def create_func_btn(self, label, style, custom_id_suffix, callback_func):
+        btn = discord.ui.Button(label=label, style=style, custom_id=f"dashboard_{custom_id_suffix}", row=4)
+        btn.callback = callback_func
+        return btn
+
+    # コールバック関数群
+    async def free_input_btn(self, interaction: discord.Interaction):
         await interaction.response.send_modal(FreeTaskStartModal())
 
-    @discord.ui.button(label="📊 レポート", style=discord.ButtonStyle.primary, custom_id="dashboard_report", row=1)
-    async def report_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def report_btn(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         dm = DataManager(self.bot)
         logs = await dm.fetch_logs(interaction.guild)
@@ -321,25 +403,21 @@ class DashboardView(discord.ui.View):
         if not images:
             await interaction.followup.send("過去7日間のデータがありません。", ephemeral=True)
             return
-        
         files = []
         if 'pie' in images: files.append(discord.File(images['pie'], filename="pie_chart.png"))
         if 'bar' in images: files.append(discord.File(images['bar'], filename="bar_chart.png"))
-        
         embed = discord.Embed(title="📊 行動レポート (過去7日間)", color=discord.Color.purple())
         if 'pie' in images: embed.set_image(url="attachment://pie_chart.png")
         await interaction.followup.send(embed=embed, files=files, ephemeral=True)
 
-    @discord.ui.button(label="⚙️ 設定", style=discord.ButtonStyle.secondary, custom_id="dashboard_manage", row=1)
-    async def manage_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def manage_btn(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         dm = DataManager(self.bot)
         tasks = await dm.load_tasks(interaction.guild)
         view = TaskManageView(self.bot, interaction.guild, tasks)
         await interaction.followup.send("📝 **タスク管理パネル**", view=view, ephemeral=True)
 
-    @discord.ui.button(label="📂 CSV", style=discord.ButtonStyle.secondary, custom_id="dashboard_csv", row=1)
-    async def csv_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def csv_btn(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         dm = DataManager(self.bot)
         channel = await dm.get_channel(interaction.guild)
@@ -357,7 +435,6 @@ class DashboardView(discord.ui.View):
                 csv_lines.append(line)
                 count += 1
             except: continue
-        
         if count == 0:
             await interaction.followup.send("データがありません。", ephemeral=True)
             return
@@ -365,8 +442,7 @@ class DashboardView(discord.ui.View):
         file = discord.File(fp=io.StringIO(csv_data), filename=f"mylifelog_{datetime.date.today()}.csv")
         await interaction.followup.send(f"📂 {count}件のデータをエクスポートしました。", file=file, ephemeral=True)
 
-    @discord.ui.button(label="🔄 再設置", style=discord.ButtonStyle.gray, custom_id="dashboard_refresh", row=1)
-    async def refresh_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def refresh_btn(self, interaction: discord.Interaction):
         await interaction.response.defer()
         dm = DataManager(self.bot)
         tasks = await dm.load_tasks(interaction.guild)
@@ -374,23 +450,6 @@ class DashboardView(discord.ui.View):
             await interaction.message.delete()
         except: pass
         await interaction.channel.send("行動宣言パネル", view=DashboardView(self.bot, tasks))
-
-class TaskSelect(discord.ui.Select):
-    def __init__(self, tasks):
-        options = [discord.SelectOption(label=t[:100]) for t in tasks]
-        if not options: options = [discord.SelectOption(label="タスクがありません")]
-        super().__init__(placeholder="👇 今からやることを選択してスタート！", options=options, custom_id="dashboard_task_select")
-    
-    async def callback(self, interaction: discord.Interaction):
-        selected = self.values[0]
-        if selected == "タスクがありません":
-            await interaction.response.send_message("⚙️ 設定ボタンからタスクを追加してください。", ephemeral=True)
-            return
-            
-        start = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        embed = discord.Embed(title=f"🚀 スタート: {selected}", color=discord.Color.blue())
-        embed.set_footer(text=f"開始時刻: {start}")
-        await interaction.response.send_message(embed=embed, view=FinishTaskView())
 
 # ---------------------------------------------------------
 # 6. 完了処理View
@@ -420,7 +479,8 @@ class MemoModal(discord.ui.Modal, title='完了メモ'):
         dm = DataManager(client)
         await dm.save_log(interaction.guild, log_data)
 
-        embed = discord.Embed(title="✅ お疲れ様でした！", color=discord.Color.gold())
+        praise = random.choice(PRAISE_MESSAGES)
+        embed = discord.Embed(title=f"✅ {praise}", color=discord.Color.gold())
         embed.add_field(name="内容", value=self.task_name)
         embed.add_field(name="時間", value=log_data['duration_str'])
         if self.memo.value:
