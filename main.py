@@ -79,7 +79,7 @@ client = commands.Bot(command_prefix='!', intents=intents)
 class DataManager:
     def __init__(self, bot):
         self.bot = bot
-        # データ構造を変更: 文字列リスト -> 辞書リスト
+        # データ構造: 辞書リスト
         self.default_tasks = [
             {"name": "🛁 お風呂", "style": "primary"},
             {"name": "💻 作業・勉強", "style": "primary"},
@@ -107,7 +107,6 @@ class DataManager:
             if msg.content.startswith("CONFIG_TASKS:"):
                 try:
                     data = json.loads(msg.content.replace("CONFIG_TASKS:", ""))
-                    # データマイグレーション: 古い形式(文字列リスト)なら辞書リストに変換
                     if data and isinstance(data[0], str):
                         new_data = [{"name": t, "style": "secondary"} for t in data]
                         return new_data
@@ -243,7 +242,6 @@ class TaskManageView(discord.ui.View):
 
     @discord.ui.button(label="📋 並び替え/一括編集", style=discord.ButtonStyle.success)
     async def edit_all_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # タスク名のみを抽出してテキスト化
         default_text = "\n".join([t["name"] for t in self.tasks])
         await interaction.response.send_modal(EditAllModal(self, default_text))
 
@@ -255,9 +253,7 @@ class AddTaskModal(discord.ui.Modal, title="タスクの追加"):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         new_task_name = self.name.value
-        # 重複チェック
         if not any(t["name"] == new_task_name for t in self.parent_view.tasks):
-            # デフォルトはグレー(secondary)
             self.parent_view.tasks.append({"name": new_task_name, "style": "secondary"})
             await self.parent_view.refresh_panel_message(interaction)
         else:
@@ -277,7 +273,6 @@ class DeleteSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         selected_name = self.values[0]
-        # 名前で検索して削除
         self.parent_view.tasks = [t for t in self.parent_view.tasks if t["name"] != selected_name]
         await self.parent_view.refresh_panel_message(interaction)
 
@@ -305,14 +300,12 @@ class RenameModal(discord.ui.Modal, title="名前の変更"):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         val = self.new_name.value
-        # 名前を更新
         for task in self.parent_view.tasks:
             if task["name"] == self.old_name:
                 task["name"] = val
                 break
         await self.parent_view.refresh_panel_message(interaction)
 
-# --- 色変更機能 ---
 class ColorSelectTaskView(discord.ui.View):
     def __init__(self, parent_view):
         super().__init__()
@@ -325,7 +318,6 @@ class ColorSelectTask(discord.ui.Select):
         self.parent_view = parent_view
     async def callback(self, interaction: discord.Interaction):
         selected_name = self.values[0]
-        # 色選択画面へ
         await interaction.response.send_message(
             f"「{selected_name}」の色を選択してください:", 
             view=ColorSelectStyleView(self.parent_view, selected_name), 
@@ -370,19 +362,13 @@ class EditAllModal(discord.ui.Modal, title="並び替え・一括編集"):
         self.text.default = default_text
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        # 入力された名前のリスト
         new_names = [line.strip() for line in self.text.value.split('\n') if line.strip()]
-        
         if new_names:
-            # 既存のタスク設定（色情報）をバックアップ
             old_tasks_map = {t["name"]: t["style"] for t in self.parent_view.tasks}
-            
             new_tasks = []
             for name in new_names:
-                # 以前と同じ名前なら色を引き継ぐ、なければデフォルト(secondary)
                 style = old_tasks_map.get(name, "secondary")
                 new_tasks.append({"name": name, "style": style})
-            
             self.parent_view.tasks = new_tasks
             await self.parent_view.refresh_panel_message(interaction)
         else:
@@ -394,34 +380,42 @@ class FreeTaskStartModal(discord.ui.Modal, title="自由入力でスタート"):
     task_name = discord.ui.TextInput(label="今からやることは？", placeholder="例: 電球交換、ゴミ捨て")
     async def on_submit(self, interaction: discord.Interaction):
         selected = self.task_name.value
-        start = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        embed = discord.Embed(title=f"🚀 スタート: {selected}", color=discord.Color.blue())
-        embed.set_footer(text=f"開始時刻: {start}")
+        now = datetime.datetime.now()
+        start_str = now.strftime("%Y-%m-%d %H:%M:%S")
+        timestamp = int(now.timestamp())
+        
+        embed = discord.Embed(title=f"🚀 スタート: {selected}", description=f"経過: <t:{timestamp}:R>", color=discord.Color.blue())
+        embed.set_footer(text=f"開始時刻: {start_str}")
         await interaction.response.send_message(embed=embed, view=FinishTaskView())
 
 class TaskButton(discord.ui.Button):
-    def __init__(self, task_name, style_name="secondary"):
-        # スタイル名からDiscordのButtonStyleオブジェクトを取得、なければsecondary
+    def __init__(self, task_name, style_name="secondary", row=0):
         style = BUTTON_STYLES.get(style_name, discord.ButtonStyle.secondary)
-        super().__init__(label=task_name[:80], style=style)
+        super().__init__(label=task_name[:80], style=style, row=row)
         self.task_name = task_name
 
     async def callback(self, interaction: discord.Interaction):
-        start = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        embed = discord.Embed(title=f"🚀 スタート: {self.task_name}", color=discord.Color.blue())
-        embed.set_footer(text=f"開始時刻: {start}")
+        now = datetime.datetime.now()
+        start_str = now.strftime("%Y-%m-%d %H:%M:%S")
+        timestamp = int(now.timestamp())
+        
+        embed = discord.Embed(title=f"🚀 スタート: {self.task_name}", description=f"経過: <t:{timestamp}:R>", color=discord.Color.blue())
+        embed.set_footer(text=f"開始時刻: {start_str}")
         await interaction.response.send_message(embed=embed, view=FinishTaskView())
 
 class OverflowTaskSelect(discord.ui.Select):
-    def __init__(self, tasks):
+    def __init__(self, tasks, row=3):
         options = [discord.SelectOption(label=t["name"][:100]) for t in tasks]
-        super().__init__(placeholder="⏬ その他のタスク...", options=options, custom_id="dashboard_overflow_select")
+        super().__init__(placeholder="⏬ その他のタスク...", options=options, custom_id="dashboard_overflow_select", row=row)
     
     async def callback(self, interaction: discord.Interaction):
         selected = self.values[0]
-        start = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        embed = discord.Embed(title=f"🚀 スタート: {selected}", color=discord.Color.blue())
-        embed.set_footer(text=f"開始時刻: {start}")
+        now = datetime.datetime.now()
+        start_str = now.strftime("%Y-%m-%d %H:%M:%S")
+        timestamp = int(now.timestamp())
+        
+        embed = discord.Embed(title=f"🚀 スタート: {selected}", description=f"経過: <t:{timestamp}:R>", color=discord.Color.blue())
+        embed.set_footer(text=f"開始時刻: {start_str}")
         await interaction.response.send_message(embed=embed, view=FinishTaskView())
 
 class DashboardView(discord.ui.View):
@@ -429,17 +423,24 @@ class DashboardView(discord.ui.View):
         super().__init__(timeout=None)
         self.bot = bot
         
-        max_buttons = 15
+        # レイアウト設定
+        buttons_per_row = 3
+        max_task_rows = 3
+        max_buttons = buttons_per_row * max_task_rows # 9個
+
         main_tasks = tasks[:max_buttons]
         overflow_tasks = tasks[max_buttons:]
 
-        # メインのタスクをボタンとして配置（保存されたスタイルを使用）
-        for task in main_tasks:
-            self.add_item(TaskButton(task["name"], task.get("style", "secondary")))
+        # メインのタスクをボタンとして配置 (3つごとに改行)
+        for i, task in enumerate(main_tasks):
+            row = i // buttons_per_row
+            self.add_item(TaskButton(task["name"], task.get("style", "secondary"), row=row))
 
         if overflow_tasks:
-            self.add_item(OverflowTaskSelect(overflow_tasks))
+            # あふれたタスクは Row 3 (4行目)
+            self.add_item(OverflowTaskSelect(overflow_tasks, row=3))
 
+        # 機能ボタンは Row 4 (5行目) に固定
         self.add_item(self.create_func_btn("📝 自由入力", discord.ButtonStyle.secondary, "free_input", self.free_input_btn))
         self.add_item(self.create_func_btn("📊 レポート", discord.ButtonStyle.primary, "report", self.report_btn))
         self.add_item(self.create_func_btn("⚙️ 設定", discord.ButtonStyle.secondary, "manage", self.manage_btn))
@@ -518,7 +519,6 @@ class DashboardView(discord.ui.View):
 # ---------------------------------------------------------
 class MemoModal(discord.ui.Modal, title='完了メモ'):
     memo = discord.ui.TextInput(label='一言メモ（任意）', style=discord.TextStyle.short, required=False)
-    # 修正: original_messageを受け取るように変更
     def __init__(self, task_name, start_time, view_item, original_message):
         super().__init__()
         self.task_name = task_name
@@ -557,9 +557,7 @@ class MemoModal(discord.ui.Modal, title='完了メモ'):
         for child in self.view_item.children:
             child.disabled = True
             
-        # 修正: 保存しておいたメッセージを使って編集
         await self.original_message.edit(view=self.view_item)
-        
         await interaction.followup.send(embed=embed)
 
 class FinishTaskView(discord.ui.View):
@@ -572,7 +570,6 @@ class FinishTaskView(discord.ui.View):
             time_str = embed.footer.text.replace("開始時刻: ", "")
             start_time = datetime.datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
             task_name = embed.title.replace("🚀 スタート: ", "")
-            # 修正: interaction.messageを渡す
             await interaction.response.send_modal(MemoModal(task_name, start_time, self, interaction.message))
         except:
             await interaction.response.send_message("エラー: タスク情報を読み取れませんでした。", ephemeral=True)
