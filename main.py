@@ -188,10 +188,8 @@ class TaskManageView(discord.ui.View):
         self.dm = DataManager(bot)
 
     async def refresh_panel_message(self, interaction):
-        # 設定保存後、管理パネルは消して、メインパネルを再送する
         await self.dm.save_tasks(self.guild, self.tasks)
         await interaction.followup.send("✅ 設定を保存しました。新しいパネルを下に表示します。", ephemeral=True)
-        # メインパネルを再送
         await interaction.channel.send("行動宣言パネル", view=DashboardView(self.bot, self.tasks))
 
     @discord.ui.button(label="➕ 追加", style=discord.ButtonStyle.primary)
@@ -289,13 +287,29 @@ class EditAllModal(discord.ui.Modal, title="並び替え・一括編集"):
 
 # --- Dashboard Components ---
 
+class FreeTaskStartModal(discord.ui.Modal, title="自由入力でスタート"):
+    task_name = discord.ui.TextInput(label="今からやることは？", placeholder="例: 電球交換、ゴミ捨て")
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        # 自由入力されたタスク名で開始
+        selected = self.task_name.value
+        start = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        embed = discord.Embed(title=f"🚀 スタート: {selected}", color=discord.Color.blue())
+        embed.set_footer(text=f"開始時刻: {start}")
+        await interaction.response.send_message(embed=embed, view=FinishTaskView())
+
 class DashboardView(discord.ui.View):
     def __init__(self, bot, tasks):
         super().__init__(timeout=None)
         self.bot = bot
         self.add_item(TaskSelect(tasks))
 
-    @discord.ui.button(label="📊 レポート(7日)", style=discord.ButtonStyle.primary, custom_id="dashboard_report", row=1)
+    @discord.ui.button(label="📝 自由入力", style=discord.ButtonStyle.success, custom_id="dashboard_free_input", row=1)
+    async def free_input_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 自由入力モーダルを表示
+        await interaction.response.send_modal(FreeTaskStartModal())
+
+    @discord.ui.button(label="📊 レポート", style=discord.ButtonStyle.primary, custom_id="dashboard_report", row=1)
     async def report_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         dm = DataManager(self.bot)
@@ -351,12 +365,11 @@ class DashboardView(discord.ui.View):
         file = discord.File(fp=io.StringIO(csv_data), filename=f"mylifelog_{datetime.date.today()}.csv")
         await interaction.followup.send(f"📂 {count}件のデータをエクスポートしました。", file=file, ephemeral=True)
 
-    @discord.ui.button(label="🔄 パネル再設置", style=discord.ButtonStyle.gray, custom_id="dashboard_refresh", row=1)
+    @discord.ui.button(label="🔄 再設置", style=discord.ButtonStyle.gray, custom_id="dashboard_refresh", row=1)
     async def refresh_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         dm = DataManager(self.bot)
         tasks = await dm.load_tasks(interaction.guild)
-        # 古いパネルを消そうと試みる
         try:
             await interaction.message.delete()
         except: pass
@@ -364,7 +377,6 @@ class DashboardView(discord.ui.View):
 
 class TaskSelect(discord.ui.Select):
     def __init__(self, tasks):
-        # 永続化のためにはcustom_idが必須。リストが空の場合はプレースホルダーを入れる
         options = [discord.SelectOption(label=t[:100]) for t in tasks]
         if not options: options = [discord.SelectOption(label="タスクがありません")]
         super().__init__(placeholder="👇 今からやることを選択してスタート！", options=options, custom_id="dashboard_task_select")
@@ -441,7 +453,6 @@ async def on_ready():
     print(f'ログイン成功: {client.user}')
     await client.tree.sync()
     client.add_view(FinishTaskView())
-    # 永続化Viewの登録（ダミーデータで登録するが、custom_idが一致していれば既存のパネルも動く）
     client.add_view(DashboardView(client, ["Loading..."]))
 
 @client.tree.command(name="setup", description="ダッシュボード(行動宣言パネル)を設置します")
@@ -450,9 +461,6 @@ async def setup(interaction: discord.Interaction):
     dm = DataManager(client)
     tasks = await dm.load_tasks(interaction.guild)
     await interaction.followup.send("行動宣言パネル", view=DashboardView(client, tasks))
-
-# 他のコマンド（report, manage_tasks, export_csv）はパネル内のボタンに統合したため削除しても良いが
-# 念のため残すか、あるいは混乱を避けるために削除推奨。ここでは削除してシンプルにする。
 
 keep_alive()
 client.run(TOKEN)
