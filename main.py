@@ -43,7 +43,6 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 CH_DATA = "🔒データ保存用"
 CH_DASHBOARD = "🎮ダッシュボード"
 CH_TIMELINE = "📜タイムライン"
-VC_FOCUS = "🎙️集中ルーム"
 CAT_NAME = "MY LIFE LOG"
 
 PRAISE_MESSAGES = [
@@ -76,7 +75,7 @@ except Exception as e:
 
 intents = discord.Intents.default()
 intents.message_content = True
-intents.voice_states = True # ボイス状態の監視に必要
+# intents.voice_states = True # ボイス機能削除のため不要
 client = commands.Bot(command_prefix='!', intents=intents)
 
 # ---------------------------------------------------------
@@ -97,15 +96,12 @@ class DataManager:
 
     async def get_data_channel(self, guild):
         """データ保存用チャンネルを取得（なければ作成）"""
-        # まず名前で探す（新構成）
         channel = discord.utils.get(guild.text_channels, name=CH_DATA)
         if channel: return channel
         
-        # なければ旧名で探す
         channel = discord.utils.get(guild.text_channels, name="mylifelog-data")
         if channel: return channel
 
-        # どちらもなければ作成（とりあえずカテゴリなしで）
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
             guild.me: discord.PermissionOverwrite(read_messages=True),
@@ -116,7 +112,6 @@ class DataManager:
         """タイムラインチャンネルを取得（なければ作成した場所 or setupした場所）"""
         channel = discord.utils.get(guild.text_channels, name=CH_TIMELINE)
         if channel: return channel
-        # なければデータチャンネルと同じ場所へ（フォールバック）
         return await self.get_data_channel(guild)
 
     async def load_tasks(self, guild):
@@ -147,10 +142,7 @@ class DataManager:
         await msg.pin()
 
     async def save_log(self, guild, log_data):
-        # データはDataChannelへ
         data_ch = await self.get_data_channel(guild)
-        
-        # ユーザーへの表示はTimelineChannelへ
         timeline_ch = await self.get_timeline_channel(guild)
 
         embed = discord.Embed(title=f"✅ {log_data['task']}", color=discord.Color.green())
@@ -160,10 +152,8 @@ class DataManager:
         embed.set_footer(text="Logged via MyLifeLog")
         embed.timestamp = datetime.datetime.now()
         
-        # タイムラインに表示
         await timeline_ch.send(embed=embed)
 
-        # データ保存用（隠しデータ付き）
         embed.set_footer(text=f"LOG_ID:{json.dumps(log_data, ensure_ascii=False)}")
         await data_ch.send(embed=embed)
 
@@ -179,11 +169,6 @@ class DataManager:
                 logs.append(data)
             except: continue
         return logs
-
-    # VC計測用の一時保存（ステートレスにするためチャンネルのトピックやメッセージを使いたいが、
-    # 頻繁な書き込み制限を避けるため、今回はメモリ上のキャッシュを使用する）
-    # ※Bot再起動でVC計測中のデータは消えるが、利便性優先
-    vc_sessions = {} # {user_id: start_time}
 
 # ---------------------------------------------------------
 # 4. グラフ生成クラス
@@ -751,46 +736,7 @@ class FinishTaskView(discord.ui.View):
             await interaction.response.send_message("エラー: タスク情報を読み取れませんでした。", ephemeral=True)
 
 # ---------------------------------------------------------
-# 7. ボイスチャンネル・イベントハンドラ
-# ---------------------------------------------------------
-@client.event
-async def on_voice_state_update(member, before, after):
-    if member.bot: return
-    dm = DataManager(client)
-    
-    # 集中ルームに入室したとき
-    if after.channel and after.channel.name == VC_FOCUS:
-        start_time = datetime.datetime.now()
-        dm.vc_sessions[member.id] = start_time
-        
-        # タイムラインに通知
-        timeline_ch = await dm.get_timeline_channel(member.guild)
-        start_str = start_time.strftime("%H:%M")
-        embed = discord.Embed(description=f"🎙️ **{member.display_name}** さんが集中ルームに入室しました。\n計測を開始します... ({start_str})", color=discord.Color.blue())
-        await timeline_ch.send(embed=embed)
-
-    # 集中ルームから退室（または移動）したとき
-    if before.channel and before.channel.name == VC_FOCUS:
-        start_time = dm.vc_sessions.pop(member.id, None)
-        if start_time:
-            end_time = datetime.datetime.now()
-            duration = end_time - start_time
-            minutes = int(duration.total_seconds() // 60)
-            seconds = int(duration.total_seconds() % 60)
-            
-            # ログ保存
-            log_data = {
-                "task": "💻 作業・勉強 (VC)",
-                "duration_min": minutes,
-                "duration_str": f"{minutes}分 {seconds}秒",
-                "memo": "集中ルーム自動計測",
-                "date": end_time.strftime("%Y-%m-%d"),
-                "timestamp": end_time.isoformat()
-            }
-            await dm.save_log(member.guild, log_data)
-
-# ---------------------------------------------------------
-# 8. 起動 & コマンド定義
+# 7. 起動 & コマンド定義
 # ---------------------------------------------------------
 @client.event
 async def on_ready():
@@ -832,17 +778,11 @@ async def setup_server(interaction: discord.Interaction):
         }
         data_ch = await guild.create_text_channel(CH_DATA, category=category, overwrites=overwrites)
     
-    # 4. 集中ルーム（ボイス）
-    vc_ch = discord.utils.get(guild.voice_channels, name=VC_FOCUS)
-    if not vc_ch:
-        await guild.create_voice_channel(VC_FOCUS, category=category)
-
     # パネル設置
     dm = DataManager(client)
     tasks = await dm.load_tasks(guild)
     
-    # 古いパネルがあれば消したいが、特定できないので新規投稿
-    await dash_ch.purge(limit=5) # 掃除
+    await dash_ch.purge(limit=5)
     await dash_ch.send("行動宣言パネル", view=DashboardView(client, tasks))
 
     await interaction.followup.send("✅ サーバー構成を最適化しました！\n`🎮ダッシュボード` チャンネルから操作を開始してください。", ephemeral=True)
