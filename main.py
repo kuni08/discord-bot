@@ -43,7 +43,7 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 CH_DATA = "🔒データ保存用"
 CH_DASHBOARD = "🎮ダッシュボード"
 CH_TIMELINE = "📜タイムライン"
-CH_GOALS = "🎯目標管理" # 新規追加
+CH_GOALS = "🎯目標管理"
 CAT_NAME = "MY LIFE LOG"
 
 PRAISE_MESSAGES = [
@@ -84,28 +84,29 @@ client = commands.Bot(command_prefix='!', intents=intents)
 class DataManager:
     def __init__(self, bot):
         self.bot = bot
+        # デフォルトタスクの変更（指定リスト + 絵文字・色設定）
         self.default_tasks = [
-            {"name": "🛁 お風呂", "style": "primary"},
-            {"name": "💻 作業・勉強", "style": "primary"},
+            {"name": "📚 勉強", "style": "primary"},
+            {"name": "📖 読書", "style": "primary"},
+            {"name": "🏃 運動", "style": "success"},
             {"name": "🍽️ 食事", "style": "success"},
-            {"name": "🧹 家事・掃除", "style": "secondary"},
+            {"name": "🛁 風呂", "style": "primary"},
             {"name": "🚶 移動", "style": "secondary"},
-            {"name": "💤 睡眠・仮眠", "style": "secondary"},
-            {"name": "🎮 趣味・休憩", "style": "success"}
+            {"name": "💻 PC作業", "style": "primary"},
+            {"name": "🎮 ゲーム", "style": "success"}
         ]
 
     async def get_channel_by_name(self, guild, name, category=None, hidden=False):
         channel = discord.utils.get(guild.text_channels, name=name)
         if channel: return channel
         
-        # なければ作成
         overwrites = {}
         if hidden:
             overwrites = {
                 guild.default_role: discord.PermissionOverwrite(read_messages=False),
                 guild.me: discord.PermissionOverwrite(read_messages=True),
             }
-        elif name == CH_DASHBOARD or name == CH_GOALS: # 書き込み不可チャンネル
+        elif name == CH_DASHBOARD or name == CH_GOALS:
             overwrites = {
                 guild.default_role: discord.PermissionOverwrite(send_messages=False),
                 guild.me: discord.PermissionOverwrite(send_messages=True)
@@ -150,7 +151,7 @@ class DataManager:
         msg = await channel.send(f"CONFIG_TASKS:{json.dumps(tasks, ensure_ascii=False)}")
         await msg.pin()
 
-    # --- 目標設定 (複数目標対応) ---
+    # --- 目標設定 ---
     async def load_goals(self, guild):
         channel = await self.get_data_channel(guild)
         pins = await channel.pins()
@@ -158,12 +159,11 @@ class DataManager:
             if msg.content.startswith("CONFIG_GOALS:"):
                 try:
                     data = json.loads(msg.content.replace("CONFIG_GOALS:", ""))
-                    # マイグレーション: 古い形式 {task: {target: 60}} -> {task: [{target: 60}]}
                     new_data = {}
                     for k, v in data.items():
-                        if isinstance(v, dict): # 古い形式
+                        if isinstance(v, dict):
                             new_data[k] = [v]
-                        else: # 新しい形式 (list)
+                        else:
                             new_data[k] = v
                     return new_data
                 except: pass
@@ -196,7 +196,6 @@ class DataManager:
         embed.set_footer(text=f"LOG_ID:{json.dumps(log_data, ensure_ascii=False)}")
         await data_ch.send(embed=embed)
 
-        # ログ保存後に目標パネルを更新（進捗が変わるため）
         await self.refresh_goals_panel(guild)
 
     async def fetch_logs(self, guild, limit=1500):
@@ -214,11 +213,9 @@ class DataManager:
 
     # --- 目標パネルの更新 ---
     async def refresh_goals_panel(self, guild):
-        """目標管理チャンネルのパネルを再描画"""
         goals_ch = await self.get_goals_channel(guild)
         if not goals_ch: return
 
-        # データを取得してEmbed作成
         logs = await self.fetch_logs(guild, limit=1000)
         goals = await self.load_goals(guild)
         
@@ -243,9 +240,7 @@ class DataManager:
                         inline=False
                     )
         
-        # 過去のパネルを消して新しいのを送る
         await goals_ch.purge(limit=5)
-        # タスクリストを渡す必要があるのでロード
         tasks = await self.load_tasks(guild)
         await goals_ch.send(embed=embed, view=GoalManagePanel(self.bot, tasks))
 
@@ -273,7 +268,6 @@ class GraphGenerator:
         images = {}
         fp = fm.FontProperties(fname=FONT_PATH, size=14) if os.path.exists(FONT_PATH) else None
 
-        # 円グラフ
         plt.figure(figsize=(10, 6))
         task_sum = df.groupby('task')['duration_min'].sum()
         if not task_sum.empty:
@@ -293,7 +287,6 @@ class GraphGenerator:
             images['pie'] = buf_pie
             plt.close()
 
-        # 積み上げ棒グラフ
         plt.figure(figsize=(12, 6))
         pivot_df = df.pivot_table(index='date', columns='task', values='duration_min', aggfunc='sum', fill_value=0)
         if not pivot_df.empty:
@@ -311,7 +304,6 @@ class GraphGenerator:
             images['bar'] = buf_bar
             plt.close()
 
-        # ヒートマップ
         plt.figure(figsize=(10, 5))
         df['weekday'] = df['timestamp_obj'].dt.weekday
         df['hour'] = df['timestamp_obj'].dt.hour
@@ -410,7 +402,6 @@ class GraphGenerator:
         plt.close()
         return buf
 
-    # --- 進捗計算ロジック (複数目標対応版) ---
     @staticmethod
     def calculate_progress(logs, goals):
         if not logs or not goals: return []
@@ -430,7 +421,6 @@ class GraphGenerator:
         progress_data = []
         
         for task_name, goal_list in goals.items():
-            # 形式統一: 単一辞書ならリストに入れる
             if isinstance(goal_list, dict): goal_list = [goal_list]
             
             for goal_info in goal_list:
@@ -482,19 +472,53 @@ class GoalManagePanel(discord.ui.View):
         self.bot = bot
         self.tasks = tasks
 
-    @discord.ui.button(label="➕ 目標を追加", style=discord.ButtonStyle.success, custom_id="goal_panel_add")
+    @discord.ui.button(label="➕ 目標を追加", style=discord.ButtonStyle.success, custom_id="goal_panel_add", row=0)
     async def add_goal(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("目標を追加するタスクを選択:", view=GoalAddSelectView(self.bot, self.tasks), ephemeral=True)
 
-    @discord.ui.button(label="🗑️ 目標を削除", style=discord.ButtonStyle.danger, custom_id="goal_panel_delete")
+    @discord.ui.button(label="🗑️ 目標を削除", style=discord.ButtonStyle.danger, custom_id="goal_panel_delete", row=0)
     async def delete_goal(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("削除する目標のタスクを選択:", view=GoalDeleteTaskSelectView(self.bot, self.tasks), ephemeral=True)
 
-    @discord.ui.button(label="🔄 更新", style=discord.ButtonStyle.secondary, custom_id="goal_panel_refresh")
+    @discord.ui.button(label="🔄 更新", style=discord.ButtonStyle.secondary, custom_id="goal_panel_refresh", row=0)
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         dm = DataManager(self.bot)
         await dm.refresh_goals_panel(interaction.guild)
+
+    # 「目標一覧」ボタンを追加
+    @discord.ui.button(label="👀 目標一覧", style=discord.ButtonStyle.secondary, custom_id="goal_panel_list", row=1)
+    async def list_goals(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        dm = DataManager(self.bot)
+        goals = await dm.load_goals(interaction.guild)
+        
+        if not goals:
+            await interaction.followup.send("現在設定されている目標はありません。", ephemeral=True)
+            return
+            
+        embed = discord.Embed(title="🎯 現在の目標設定一覧", color=discord.Color.blue())
+        for task, goal_list in goals.items():
+            if isinstance(goal_list, dict): goal_list = [goal_list] # 互換性
+            
+            value_text = ""
+            for info in goal_list:
+                target = info.get('target')
+                p_code = info.get('period')
+                p_text = "不明"
+                if p_code == 'daily': p_text = "1日"
+                elif p_code == 'weekly': p_text = "1週間"
+                elif p_code == 'monthly': p_text = "1ヶ月"
+                elif p_code == 'custom':
+                    days = info.get('custom_days')
+                    p_text = f"{days}日間"
+                
+                value_text += f"・{p_text}あたり {target}分\n"
+            
+            if value_text:
+                embed.add_field(name=task, value=value_text, inline=False)
+            
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 # --- 目標追加フロー ---
 class GoalAddSelectView(discord.ui.View):
@@ -627,9 +651,8 @@ class GoalDeleteSpecificSelect(discord.ui.Select):
             await interaction.followup.send("エラー: 目標が見つかりません。", ephemeral=True)
 
 # ---------------------------------------------------------
-# 6. メインダッシュボード & タスク管理 (簡略化)
+# 6. メインダッシュボード & タスク管理
 # ---------------------------------------------------------
-# (ダッシュボードから目標系ボタンを削除し、専用チャンネルへ誘導)
 class DashboardView(discord.ui.View):
     def __init__(self, bot, tasks):
         super().__init__(timeout=None)
@@ -708,7 +731,7 @@ class DashboardView(discord.ui.View):
         target_ch = dashboard_ch if dashboard_ch else interaction.channel
         await target_ch.send("行動宣言パネル", view=DashboardView(self.bot, tasks))
 
-# --- TaskManageView (目標ボタン削除) ---
+# --- TaskManageView ---
 class TaskManageView(discord.ui.View):
     def __init__(self, bot, guild, tasks):
         super().__init__(timeout=None)
@@ -744,6 +767,30 @@ class TaskManageView(discord.ui.View):
     async def edit_all_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         default_text = "\n".join([t["name"] for t in self.tasks])
         await interaction.response.send_modal(EditAllModal(self, default_text))
+
+    @discord.ui.button(label="👀 目標一覧", style=discord.ButtonStyle.secondary, row=1)
+    async def goal_list_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        dm = DataManager(self.bot)
+        goals = await dm.load_goals(interaction.guild)
+        if not goals:
+            await interaction.followup.send("設定なし", ephemeral=True)
+            return
+        embed = discord.Embed(title="🎯 目標設定一覧", color=discord.Color.blue())
+        for task, goal_list in goals.items():
+            if isinstance(goal_list, dict): goal_list = [goal_list]
+            value_text = ""
+            for info in goal_list:
+                p_code = info.get('period')
+                target = info.get('target')
+                p_text = "不明"
+                if p_code == 'daily': p_text = "1日"
+                elif p_code == 'weekly': p_text = "1週間"
+                elif p_code == 'monthly': p_text = "1ヶ月"
+                elif p_code == 'custom': p_text = f"{info.get('custom_days')}日間"
+                value_text += f"・{p_text} {target}分\n"
+            if value_text: embed.add_field(name=task, value=value_text, inline=False)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ---------------------------------------------------------
 # その他モーダル・View (省略なし)
@@ -976,7 +1023,6 @@ async def on_ready():
     await client.tree.sync()
     client.add_view(FinishTaskView())
     client.add_view(DashboardView(client, [{"name": "Loading...", "style": "secondary"}]))
-    # 目標パネルは起動時にタスクリストが必要だが、ここではダミー登録せずコマンド経由で作成される
 
 @client.tree.command(name="setup_server", description="サーバー構成を自動セットアップします")
 async def setup_server(interaction: discord.Interaction):
@@ -984,26 +1030,21 @@ async def setup_server(interaction: discord.Interaction):
     guild = interaction.guild
     dm = DataManager(client)
     
-    # カテゴリ
     category = discord.utils.get(guild.categories, name=CAT_NAME)
     if not category:
         category = await guild.create_category(CAT_NAME)
 
-    # チャンネル作成
     await dm.get_channel_by_name(guild, CH_DASHBOARD, category)
     await dm.get_channel_by_name(guild, CH_TIMELINE, category)
     await dm.get_channel_by_name(guild, CH_GOALS, category)
     await dm.get_channel_by_name(guild, CH_DATA, category, hidden=True)
     
-    # パネル設置
     tasks = await dm.load_tasks(guild)
     
-    # ダッシュボード
     dash_ch = await dm.get_channel_by_name(guild, CH_DASHBOARD)
     await dash_ch.purge(limit=5)
     await dash_ch.send("行動宣言パネル", view=DashboardView(client, tasks))
 
-    # 目標管理パネル
     await dm.refresh_goals_panel(guild)
 
     await interaction.followup.send("✅ サーバー構成を最適化しました！", ephemeral=True)
