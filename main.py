@@ -38,13 +38,12 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 DATA_CHANNEL_NAME = "mylifelog-data"
 
 # 日本語フォントの設定
-FONT_PATH = "font.ttf" # GitHubにアップロードしたファイル名
+FONT_PATH = "font.ttf"
 try:
     if os.path.exists(FONT_PATH):
         font_prop = fm.FontProperties(fname=FONT_PATH)
         plt.rcParams['font.family'] = font_prop.get_name()
     else:
-        # フォントがない場合は英語のみ対応（文字化け回避のため警告）
         print("【警告】font.ttfが見つかりません。日本語が文字化けする可能性があります。")
 except Exception as e:
     print(f"フォント設定エラー: {e}")
@@ -119,73 +118,56 @@ class DataManager:
         return logs
 
 # ---------------------------------------------------------
-# 4. グラフ生成クラス (Matplotlib)
+# 4. グラフ生成クラス
 # ---------------------------------------------------------
 class GraphGenerator:
     @staticmethod
     def create_report_images(logs, days=7):
         if not logs: return None
-
-        # Pandas DataFrameに変換
         df = pd.DataFrame(logs)
-        df['date_obj'] = pd.to_datetime(df['date'])
-        df['timestamp_obj'] = pd.to_datetime(df.get('timestamp', df['date'])) # timestampがない古いログ対応
+        if df.empty: return None
         
-        # フィルタリング
+        df['date_obj'] = pd.to_datetime(df['date'])
         cutoff_date = pd.Timestamp.now() - pd.Timedelta(days=days)
         df = df[df['date_obj'] >= cutoff_date]
         
         if df.empty: return None
 
         images = {}
-
-        # 1. 円グラフ（合計時間の割合）
-        plt.figure(figsize=(10, 6))
-        # フォントプロパティの適用
         fp = fm.FontProperties(fname=FONT_PATH, size=14) if os.path.exists(FONT_PATH) else None
-        
+
+        # 円グラフ
+        plt.figure(figsize=(10, 6))
         task_sum = df.groupby('task')['duration_min'].sum()
-        
         if not task_sum.empty:
             colors = plt.cm.Pastel1.colors
             wedges, texts, autotexts = plt.pie(
                 task_sum, labels=None, autopct='%1.1f%%', startangle=90, colors=colors, pctdistance=0.85
             )
-            # ドーナツ型にする
             centre_circle = plt.Circle((0,0),0.70,fc='white')
             fig = plt.gcf()
             fig.gca().add_artist(centre_circle)
-            
-            # 凡例の設定（日本語フォント適用）
             plt.legend(wedges, task_sum.index, title="Tasks", loc="center left", bbox_to_anchor=(1, 0, 0.5, 1), prop=fp)
             plt.title(f"行動内訳 (過去{days}日間)", fontproperties=fp, fontsize=16)
             plt.tight_layout()
-            
             buf_pie = io.BytesIO()
             plt.savefig(buf_pie, format='png')
             buf_pie.seek(0)
             images['pie'] = buf_pie
             plt.close()
 
-        # 2. 積み上げ棒グラフ（日別の推移）
+        # 積み上げ棒グラフ
         plt.figure(figsize=(12, 6))
         pivot_df = df.pivot_table(index='date', columns='task', values='duration_min', aggfunc='sum', fill_value=0)
-        
         if not pivot_df.empty:
-            # 日付順にソート
-            pivot_df = pivot_df.sort_index()
-            # 最後の数日分だけ表示（見やすさのため）
-            pivot_df = pivot_df.tail(14) 
-            
+            pivot_df = pivot_df.sort_index().tail(14)
             ax = pivot_df.plot(kind='bar', stacked=True, colormap='Pastel1', figsize=(12, 6))
-            
             plt.title("日別積み上げグラフ", fontproperties=fp, fontsize=16)
             plt.xlabel("日付", fontproperties=fp)
             plt.ylabel("時間 (分)", fontproperties=fp)
             plt.legend(prop=fp, bbox_to_anchor=(1.05, 1), loc='upper left')
             plt.xticks(rotation=45, fontproperties=fp)
             plt.tight_layout()
-            
             buf_bar = io.BytesIO()
             plt.savefig(buf_bar, format='png')
             buf_bar.seek(0)
@@ -195,7 +177,7 @@ class GraphGenerator:
         return images
 
 # ---------------------------------------------------------
-# 5. UI: タスク管理 (追加・削除・並び替え)
+# 5. UI: タスク管理 & メインダッシュボード
 # ---------------------------------------------------------
 class TaskManageView(discord.ui.View):
     def __init__(self, bot, guild, tasks):
@@ -205,9 +187,12 @@ class TaskManageView(discord.ui.View):
         self.tasks = tasks
         self.dm = DataManager(bot)
 
-    async def refresh_panel(self, interaction):
+    async def refresh_panel_message(self, interaction):
+        # 設定保存後、管理パネルは消して、メインパネルを再送する
         await self.dm.save_tasks(self.guild, self.tasks)
-        await interaction.followup.send("✅ 設定を保存しました。反映するには `/setup` でパネルを出し直してください。", ephemeral=True)
+        await interaction.followup.send("✅ 設定を保存しました。新しいパネルを下に表示します。", ephemeral=True)
+        # メインパネルを再送
+        await interaction.channel.send("行動宣言パネル", view=DashboardView(self.bot, self.tasks))
 
     @discord.ui.button(label="➕ 追加", style=discord.ButtonStyle.primary)
     async def add_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -215,17 +200,14 @@ class TaskManageView(discord.ui.View):
 
     @discord.ui.button(label="🗑️ 削除", style=discord.ButtonStyle.danger)
     async def delete_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 削除用ドロップダウンを含むViewを表示
         await interaction.response.send_message("削除するタスクを選択してください:", view=DeleteSelectView(self), ephemeral=True)
 
     @discord.ui.button(label="✏️ リネーム", style=discord.ButtonStyle.secondary)
     async def rename_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # リネーム用ドロップダウンを含むViewを表示
         await interaction.response.send_message("名前を変更するタスクを選択してください:", view=RenameSelectView(self), ephemeral=True)
 
     @discord.ui.button(label="📋 並び替え/一括編集", style=discord.ButtonStyle.success)
     async def edit_all_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 現在のリストを改行区切りのテキストとしてModalに渡す
         default_text = "\n".join(self.tasks)
         await interaction.response.send_modal(EditAllModal(self, default_text))
 
@@ -239,7 +221,7 @@ class AddTaskModal(discord.ui.Modal, title="タスクの追加"):
         new_task = self.name.value
         if new_task not in self.parent_view.tasks:
             self.parent_view.tasks.append(new_task)
-            await self.parent_view.refresh_panel(interaction)
+            await self.parent_view.refresh_panel_message(interaction)
         else:
             await interaction.followup.send("そのタスクは既に存在します。", ephemeral=True)
 
@@ -259,7 +241,7 @@ class DeleteSelect(discord.ui.Select):
         selected = self.values[0]
         if selected in self.parent_view.tasks:
             self.parent_view.tasks.remove(selected)
-            await self.parent_view.refresh_panel(interaction)
+            await self.parent_view.refresh_panel_message(interaction)
 
 class RenameSelectView(discord.ui.View):
     def __init__(self, parent_view):
@@ -285,11 +267,10 @@ class RenameModal(discord.ui.Modal, title="名前の変更"):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         val = self.new_name.value
-        # インデックスを見つけて置換
         if self.old_name in self.parent_view.tasks:
             idx = self.parent_view.tasks.index(self.old_name)
             self.parent_view.tasks[idx] = val
-            await self.parent_view.refresh_panel(interaction)
+            await self.parent_view.refresh_panel_message(interaction)
 
 class EditAllModal(discord.ui.Modal, title="並び替え・一括編集"):
     text = discord.ui.TextInput(label="1行に1つタスクを記述", style=discord.TextStyle.paragraph)
@@ -299,16 +280,108 @@ class EditAllModal(discord.ui.Modal, title="並び替え・一括編集"):
         self.text.default = default_text
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        # 改行区切りでリスト化し、空行を除去
         new_tasks = [line.strip() for line in self.text.value.split('\n') if line.strip()]
         if new_tasks:
             self.parent_view.tasks = new_tasks
-            await self.parent_view.refresh_panel(interaction)
+            await self.parent_view.refresh_panel_message(interaction)
         else:
-            await interaction.followup.send("タスクが空です。変更をキャンセルしました。", ephemeral=True)
+            await interaction.followup.send("タスクが空です。", ephemeral=True)
+
+# --- Dashboard Components ---
+
+class DashboardView(discord.ui.View):
+    def __init__(self, bot, tasks):
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.add_item(TaskSelect(tasks))
+
+    @discord.ui.button(label="📊 レポート(7日)", style=discord.ButtonStyle.primary, custom_id="dashboard_report", row=1)
+    async def report_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        dm = DataManager(self.bot)
+        logs = await dm.fetch_logs(interaction.guild)
+        if not logs:
+            await interaction.followup.send("データが見つかりませんでした。", ephemeral=True)
+            return
+        images = GraphGenerator.create_report_images(logs, days=7)
+        if not images:
+            await interaction.followup.send("過去7日間のデータがありません。", ephemeral=True)
+            return
+        
+        files = []
+        if 'pie' in images: files.append(discord.File(images['pie'], filename="pie_chart.png"))
+        if 'bar' in images: files.append(discord.File(images['bar'], filename="bar_chart.png"))
+        
+        embed = discord.Embed(title="📊 行動レポート (過去7日間)", color=discord.Color.purple())
+        if 'pie' in images: embed.set_image(url="attachment://pie_chart.png")
+        await interaction.followup.send(embed=embed, files=files, ephemeral=True)
+
+    @discord.ui.button(label="⚙️ 設定", style=discord.ButtonStyle.secondary, custom_id="dashboard_manage", row=1)
+    async def manage_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        dm = DataManager(self.bot)
+        tasks = await dm.load_tasks(interaction.guild)
+        view = TaskManageView(self.bot, interaction.guild, tasks)
+        await interaction.followup.send("📝 **タスク管理パネル**", view=view, ephemeral=True)
+
+    @discord.ui.button(label="📂 CSV", style=discord.ButtonStyle.secondary, custom_id="dashboard_csv", row=1)
+    async def csv_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        dm = DataManager(self.bot)
+        channel = await dm.get_channel(interaction.guild)
+        csv_lines = ["Date,Time,Task,Duration(min),Memo"]
+        count = 0
+        async for msg in channel.history(limit=1000):
+            if not msg.embeds: continue
+            embed = msg.embeds[0]
+            if not embed.footer.text or "LOG_ID:" not in embed.footer.text: continue
+            try:
+                json_str = embed.footer.text.replace("LOG_ID:", "")
+                data = json.loads(json_str)
+                memo = data.get('memo', '').replace('"', '""')
+                line = f"{data['date']},{data.get('timestamp', '')},{data['task']},{data['duration_min']},\"{memo}\""
+                csv_lines.append(line)
+                count += 1
+            except: continue
+        
+        if count == 0:
+            await interaction.followup.send("データがありません。", ephemeral=True)
+            return
+        csv_data = "\n".join(csv_lines)
+        file = discord.File(fp=io.StringIO(csv_data), filename=f"mylifelog_{datetime.date.today()}.csv")
+        await interaction.followup.send(f"📂 {count}件のデータをエクスポートしました。", file=file, ephemeral=True)
+
+    @discord.ui.button(label="🔄 パネル再設置", style=discord.ButtonStyle.gray, custom_id="dashboard_refresh", row=1)
+    async def refresh_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        dm = DataManager(self.bot)
+        tasks = await dm.load_tasks(interaction.guild)
+        # 古いパネルを消そうと試みる
+        try:
+            await interaction.message.delete()
+        except: pass
+        await interaction.channel.send("行動宣言パネル", view=DashboardView(self.bot, tasks))
+
+class TaskSelect(discord.ui.Select):
+    def __init__(self, tasks):
+        # 永続化のためにはcustom_idが必須。リストが空の場合はプレースホルダーを入れる
+        options = [discord.SelectOption(label=t[:100]) for t in tasks]
+        if not options: options = [discord.SelectOption(label="タスクがありません")]
+        super().__init__(placeholder="👇 今からやることを選択してスタート！", options=options, custom_id="dashboard_task_select")
+    
+    async def callback(self, interaction: discord.Interaction):
+        selected = self.values[0]
+        if selected == "タスクがありません":
+            await interaction.response.send_message("⚙️ 設定ボタンからタスクを追加してください。", ephemeral=True)
+            return
+            
+        start = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        embed = discord.Embed(title=f"🚀 スタート: {selected}", color=discord.Color.blue())
+        embed.set_footer(text=f"開始時刻: {start}")
+        await interaction.response.send_message(embed=embed, view=FinishTaskView())
 
 # ---------------------------------------------------------
-# 6. UI: メインパネル & 完了処理
+# 6. 完了処理View
 # ---------------------------------------------------------
 class MemoModal(discord.ui.Modal, title='完了メモ'):
     memo = discord.ui.TextInput(label='一言メモ（任意）', style=discord.TextStyle.short, required=False)
@@ -360,76 +433,26 @@ class FinishTaskView(discord.ui.View):
         except:
             await interaction.response.send_message("エラー: タスク情報を読み取れませんでした。", ephemeral=True)
 
-class TaskSelect(discord.ui.Select):
-    def __init__(self, tasks):
-        options = [discord.SelectOption(label=t[:100]) for t in tasks]
-        super().__init__(placeholder="今から何をしますか？", options=options, custom_id="task_select_v4")
-    async def callback(self, interaction: discord.Interaction):
-        selected = self.values[0]
-        start = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        embed = discord.Embed(title=f"🚀 スタート: {selected}", color=discord.Color.blue())
-        embed.set_footer(text=f"開始時刻: {start}")
-        await interaction.response.send_message(embed=embed, view=FinishTaskView())
-
-class PermanentPanelView(discord.ui.View):
-    def __init__(self, tasks):
-        super().__init__(timeout=None)
-        self.add_item(TaskSelect(tasks))
-
 # ---------------------------------------------------------
-# 7. コマンド定義
+# 7. 起動 & コマンド定義
 # ---------------------------------------------------------
 @client.event
 async def on_ready():
     print(f'ログイン成功: {client.user}')
     await client.tree.sync()
     client.add_view(FinishTaskView())
+    # 永続化Viewの登録（ダミーデータで登録するが、custom_idが一致していれば既存のパネルも動く）
+    client.add_view(DashboardView(client, ["Loading..."]))
 
-@client.tree.command(name="setup", description="宣言パネルを設置します")
+@client.tree.command(name="setup", description="ダッシュボード(行動宣言パネル)を設置します")
 async def setup(interaction: discord.Interaction):
     await interaction.response.defer()
     dm = DataManager(client)
     tasks = await dm.load_tasks(interaction.guild)
-    await interaction.followup.send("行動宣言パネル", view=PermanentPanelView(tasks))
+    await interaction.followup.send("行動宣言パネル", view=DashboardView(client, tasks))
 
-@client.tree.command(name="manage_tasks", description="タスクの追加・削除・編集・並び替えを行います")
-async def manage_tasks(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    dm = DataManager(client)
-    tasks = await dm.load_tasks(interaction.guild)
-    view = TaskManageView(client, interaction.guild, tasks)
-    await interaction.followup.send("📝 **タスク管理パネル**\nボタンを押して操作してください。\n※ 編集後は `/setup` でパネルを更新することをお勧めします。", view=view, ephemeral=True)
-
-@client.tree.command(name="report", description="グラフ付きの行動レポートを表示します")
-@app_commands.describe(days="集計する過去の日数")
-async def report(interaction: discord.Interaction, days: int = 7):
-    await interaction.response.defer()
-    
-    dm = DataManager(client)
-    logs = await dm.fetch_logs(interaction.guild)
-    
-    if not logs:
-        await interaction.followup.send("データが見つかりませんでした。")
-        return
-
-    # グラフ生成
-    images = GraphGenerator.create_report_images(logs, days)
-    
-    if not images:
-        await interaction.followup.send(f"過去{days}日間のデータがありません。")
-        return
-
-    files = []
-    if 'pie' in images:
-        files.append(discord.File(images['pie'], filename="pie_chart.png"))
-    if 'bar' in images:
-        files.append(discord.File(images['bar'], filename="bar_chart.png"))
-        
-    embed = discord.Embed(title=f"📊 行動レポート (過去{days}日間)", color=discord.Color.purple())
-    if 'pie' in images:
-        embed.set_image(url="attachment://pie_chart.png") # 1枚目を大きく表示
-    
-    await interaction.followup.send(embed=embed, files=files)
+# 他のコマンド（report, manage_tasks, export_csv）はパネル内のボタンに統合したため削除しても良いが
+# 念のため残すか、あるいは混乱を避けるために削除推奨。ここでは削除してシンプルにする。
 
 keep_alive()
 client.run(TOKEN)
