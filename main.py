@@ -460,6 +460,9 @@ class MemoModal(discord.ui.Modal, title='完了メモ'):
         self.view_item = view_item
         
     async def on_submit(self, interaction: discord.Interaction):
+        # 先に応答してタイムアウトを防ぐ
+        await interaction.response.defer()
+
         end_time = datetime.datetime.now()
         duration = end_time - self.start_time
         minutes = int(duration.total_seconds() // 60)
@@ -488,7 +491,9 @@ class MemoModal(discord.ui.Modal, title='完了メモ'):
         for child in self.view_item.children:
             child.disabled = True
         await self.view_item.message.edit(view=self.view_item)
-        await interaction.response.send_message(embed=embed)
+        
+        # deferしているのでfollowupを使う
+        await interaction.followup.send(embed=embed)
 
 class FinishTaskView(discord.ui.View):
     def __init__(self):
