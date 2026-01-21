@@ -84,7 +84,7 @@ client = commands.Bot(command_prefix='!', intents=intents)
 class DataManager:
     def __init__(self, bot):
         self.bot = bot
-        # デフォルトタスクの変更（指定リスト + 絵文字・色設定）
+        # デフォルトタスク
         self.default_tasks = [
             {"name": "📚 勉強", "style": "primary"},
             {"name": "📖 読書", "style": "primary"},
@@ -451,7 +451,8 @@ class GraphGenerator:
                     end_date = start_date + pd.Timedelta(days=custom_days)
                     current = df[(df['task'] == task_name) & (df['ts_obj'] >= start_date) & (df['ts_obj'] <= end_date)]['duration_min'].sum()
                     days_left = (end_date - now).days
-                    label_period = f"{custom_days}日間 (残り{days_left}日)"
+                    if days_left < 0: days_left = 0
+                    label_period = f"{custom_days}日間 (残{days_left}日)"
                 
                 progress_data.append({
                     "task": task_name,
@@ -476,19 +477,8 @@ class GoalManagePanel(discord.ui.View):
     async def add_goal(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("目標を追加するタスクを選択:", view=GoalAddSelectView(self.bot, self.tasks), ephemeral=True)
 
-    @discord.ui.button(label="🗑️ 目標を削除", style=discord.ButtonStyle.danger, custom_id="goal_panel_delete", row=0)
-    async def delete_goal(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("削除する目標のタスクを選択:", view=GoalDeleteTaskSelectView(self.bot, self.tasks), ephemeral=True)
-
-    @discord.ui.button(label="🔄 更新", style=discord.ButtonStyle.secondary, custom_id="goal_panel_refresh", row=0)
-    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        dm = DataManager(self.bot)
-        await dm.refresh_goals_panel(interaction.guild)
-
-    # 「目標一覧」ボタンを追加
-    @discord.ui.button(label="👀 目標一覧", style=discord.ButtonStyle.secondary, custom_id="goal_panel_list", row=1)
-    async def list_goals(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="👀 目標リスト (編集・削除)", style=discord.ButtonStyle.primary, custom_id="goal_panel_list_edit", row=0)
+    async def list_edit_goal(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         dm = DataManager(self.bot)
         goals = await dm.load_goals(interaction.guild)
@@ -496,29 +486,105 @@ class GoalManagePanel(discord.ui.View):
         if not goals:
             await interaction.followup.send("現在設定されている目標はありません。", ephemeral=True)
             return
-            
-        embed = discord.Embed(title="🎯 現在の目標設定一覧", color=discord.Color.blue())
+        
+        # 目標リストのEmbed作成
+        embed = discord.Embed(title="🎯 目標リスト", description="下部のメニューから目標を選択して編集・削除ができます。", color=discord.Color.blue())
+        select_options = []
+        
         for task, goal_list in goals.items():
-            if isinstance(goal_list, dict): goal_list = [goal_list] # 互換性
+            if isinstance(goal_list, dict): goal_list = [goal_list]
             
-            value_text = ""
-            for info in goal_list:
+            for i, info in enumerate(goal_list):
                 target = info.get('target')
                 p_code = info.get('period')
-                p_text = "不明"
+                p_text = p_code
                 if p_code == 'daily': p_text = "1日"
                 elif p_code == 'weekly': p_text = "1週間"
                 elif p_code == 'monthly': p_text = "1ヶ月"
-                elif p_code == 'custom':
-                    days = info.get('custom_days')
-                    p_text = f"{days}日間"
+                elif p_code == 'custom': p_text = f"{info.get('custom_days')}日間"
                 
-                value_text += f"・{p_text}あたり {target}分\n"
+                label = f"{task}: {p_text} {target}分"
+                value = f"{task}|{i}" # 識別用: タスク名|インデックス
+                
+                embed.add_field(name=task, value=f"・{p_text}あたり {target}分", inline=False)
+                
+                # SelectMenuの制限(25個)内であれば追加
+                if len(select_options) < 25:
+                    select_options.append(discord.SelectOption(label=label[:100], value=value))
+
+        view = GoalListActionView(self.bot, select_options)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+    @discord.ui.button(label="🔄 更新", style=discord.ButtonStyle.secondary, custom_id="goal_panel_refresh", row=0)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        dm = DataManager(self.bot)
+        await dm.refresh_goals_panel(interaction.guild)
+
+# --- 目標リスト操作View (編集・削除) ---
+class GoalListActionView(discord.ui.View):
+    def __init__(self, bot, options):
+        super().__init__()
+        self.bot = bot
+        if options:
+            self.add_item(GoalListSelect(bot, options))
+        else:
+            self.add_item(discord.ui.Button(label="目標がありません", disabled=True))
+
+class GoalListSelect(discord.ui.Select):
+    def __init__(self, bot, options):
+        super().__init__(placeholder="編集・削除する目標を選択...", options=options)
+        self.bot = bot
+
+    async def callback(self, interaction: discord.Interaction):
+        # value format: "TaskName|Index"
+        selected_val = self.values[0]
+        try:
+            task_name, index_str = selected_val.rsplit('|', 1)
+            index = int(index_str)
             
-            if value_text:
-                embed.add_field(name=task, value=value_text, inline=False)
+            # アクション選択Viewを表示
+            await interaction.response.send_message(
+                f"**{task_name}** の目標を選択しました。操作を選んでください。",
+                view=GoalActionView(self.bot, task_name, index),
+                ephemeral=True
+            )
+        except:
+            await interaction.response.send_message("エラーが発生しました。", ephemeral=True)
+
+class GoalActionView(discord.ui.View):
+    def __init__(self, bot, task_name, index):
+        super().__init__()
+        self.bot = bot
+        self.task_name = task_name
+        self.index = index
+
+    @discord.ui.button(label="✏️ 編集", style=discord.ButtonStyle.primary)
+    async def edit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 既存の値を取得してModalを出したいが、Modalに初期値を入れるのは複雑なため
+        # 新規作成と同じModalを出し、内部で上書き処理を行う
+        await interaction.response.send_modal(GoalInputModal(self.bot, self.task_name, self.index))
+
+    @discord.ui.button(label="🗑️ 削除", style=discord.ButtonStyle.danger)
+    async def delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        dm = DataManager(self.bot)
+        goals = await dm.load_goals(interaction.guild)
+        
+        if self.task_name in goals:
+            task_goals = goals[self.task_name]
+            if isinstance(task_goals, dict): task_goals = [task_goals]
             
-        await interaction.followup.send(embed=embed, ephemeral=True)
+            if 0 <= self.index < len(task_goals):
+                task_goals.pop(self.index)
+                goals[self.task_name] = task_goals
+                await dm.save_goals(interaction.guild, goals)
+                await dm.refresh_goals_panel(interaction.guild)
+                await interaction.followup.send("🗑️ 目標を削除しました。", ephemeral=True)
+            else:
+                await interaction.followup.send("エラー: 目標が見つかりません。", ephemeral=True)
+        else:
+            await interaction.followup.send("エラー: タスクが見つかりません。", ephemeral=True)
 
 # --- 目標追加フロー ---
 class GoalAddSelectView(discord.ui.View):
@@ -535,26 +601,33 @@ class GoalAddSelect(discord.ui.Select):
         selected_name = self.values[0]
         await interaction.response.send_modal(GoalInputModal(self.bot, selected_name))
 
-class GoalInputModal(discord.ui.Modal, title="目標を追加"):
+class GoalInputModal(discord.ui.Modal, title="目標設定"):
+    # 柔軟な入力に対応するため、期間のバリデーションを強化
     target_time = discord.ui.TextInput(label="目標時間 (分)", placeholder="例: 60")
-    period_select = discord.ui.TextInput(label="期間 (d=日, w=週, m=月, c=カスタム)", placeholder="d", min_length=1, max_length=1)
-    custom_days = discord.ui.TextInput(label="カスタム日数 (cを選んだ場合のみ)", placeholder="例: 20 (今後20日間で)", required=False)
+    period_select = discord.ui.TextInput(label="期間 (1日, 1週間, 1ヶ月, カスタム)", placeholder="1日")
+    custom_days = discord.ui.TextInput(label="カスタム日数 (カスタムの場合のみ)", placeholder="例: 20", required=False)
 
-    def __init__(self, bot, task_name):
+    def __init__(self, bot, task_name, edit_index=None):
         super().__init__()
         self.bot = bot
         self.task_name = task_name
+        self.edit_index = edit_index # 編集モードの場合のインデックス
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         try:
             target = int(self.target_time.value)
-            p_val = self.period_select.value.lower()
-            period_map = {'d': 'daily', 'w': 'weekly', 'm': 'monthly', 'c': 'custom'}
-            period = period_map.get(p_val)
+            p_val = self.period_select.value.strip().lower()
+            
+            # 期間判定ロジック強化
+            period = None
+            if p_val in ['d', 'day', 'daily', '1日', '日', '毎日']: period = 'daily'
+            elif p_val in ['w', 'week', 'weekly', '1週間', '週', '毎週']: period = 'weekly'
+            elif p_val in ['m', 'month', 'monthly', '1ヶ月', '月', '毎月']: period = 'monthly'
+            elif p_val in ['c', 'custom', '期間', '指定']: period = 'custom'
             
             if not period:
-                await interaction.followup.send("⚠️ 期間エラー", ephemeral=True)
+                await interaction.followup.send("⚠️ 期間が認識できませんでした。「1日」「1週間」「1ヶ月」のように入力してください。", ephemeral=True)
                 return
 
             dm = DataManager(self.bot)
@@ -567,88 +640,37 @@ class GoalInputModal(discord.ui.Modal, title="目標を追加"):
                 "created_at": datetime.datetime.now().isoformat()
             }
             if period == 'custom':
-                goal_data["custom_days"] = int(self.custom_days.value)
+                if not self.custom_days.value:
+                    await interaction.followup.send("⚠️ カスタム期間を選ぶ場合は日数を入力してください。", ephemeral=True)
+                    return
+                try:
+                    goal_data["custom_days"] = int(self.custom_days.value)
+                except:
+                    await interaction.followup.send("⚠️ 日数は数字で入力してください。", ephemeral=True)
+                    return
 
-            # リストに追加 (存在しなければ作成)
+            # 保存処理
             if self.task_name not in goals:
                 goals[self.task_name] = []
-            elif isinstance(goals[self.task_name], dict): # 旧データ保護
+            elif isinstance(goals[self.task_name], dict):
                 goals[self.task_name] = [goals[self.task_name]]
             
-            goals[self.task_name].append(goal_data)
+            if self.edit_index is not None and 0 <= self.edit_index < len(goals[self.task_name]):
+                # 編集（上書き）
+                goals[self.task_name][self.edit_index] = goal_data
+                action_text = "更新"
+            else:
+                # 新規追加
+                goals[self.task_name].append(goal_data)
+                action_text = "追加"
             
-            await dm.save_goals(interaction.guild, goals)
-            await dm.refresh_goals_panel(interaction.guild) # パネル更新
-            
-            await interaction.followup.send(f"✅ **{self.task_name}** に目標を追加しました。", ephemeral=True)
-            
-        except ValueError:
-            await interaction.followup.send("⚠️ 数値入力エラー", ephemeral=True)
-
-# --- 目標削除フロー ---
-class GoalDeleteTaskSelectView(discord.ui.View):
-    def __init__(self, bot, tasks):
-        super().__init__()
-        options = [discord.SelectOption(label=t["name"][:100]) for t in tasks]
-        self.add_item(GoalDeleteTaskSelect(bot, options))
-
-class GoalDeleteTaskSelect(discord.ui.Select):
-    def __init__(self, bot, options):
-        super().__init__(placeholder="どのタスクの目標を消しますか？", options=options)
-        self.bot = bot
-    async def callback(self, interaction: discord.Interaction):
-        task_name = self.values[0]
-        dm = DataManager(self.bot)
-        goals = await dm.load_goals(interaction.guild)
-        
-        task_goals = goals.get(task_name, [])
-        if isinstance(task_goals, dict): task_goals = [task_goals]
-        
-        if not task_goals:
-            await interaction.response.send_message("このタスクには目標がありません。", ephemeral=True)
-            return
-            
-        await interaction.response.send_message(
-            "削除する目標を選択してください:", 
-            view=GoalDeleteSpecificSelectView(self.bot, task_name, task_goals),
-            ephemeral=True
-        )
-
-class GoalDeleteSpecificSelectView(discord.ui.View):
-    def __init__(self, bot, task_name, goal_list):
-        super().__init__()
-        self.bot = bot
-        self.task_name = task_name
-        self.goal_list = goal_list
-        
-        options = []
-        for i, g in enumerate(goal_list):
-            label = f"{g['target']}分 ({g['period']})"
-            options.append(discord.SelectOption(label=label, value=str(i)))
-            
-        self.add_item(GoalDeleteSpecificSelect(options))
-
-class GoalDeleteSpecificSelect(discord.ui.Select):
-    async def callback(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        index = int(self.values[0])
-        view = self.view # parent view
-        
-        dm = DataManager(view.bot)
-        goals = await dm.load_goals(interaction.guild)
-        
-        # 削除処理
-        task_goals = goals.get(view.task_name, [])
-        if isinstance(task_goals, dict): task_goals = [task_goals]
-        
-        if 0 <= index < len(task_goals):
-            task_goals.pop(index)
-            goals[view.task_name] = task_goals
             await dm.save_goals(interaction.guild, goals)
             await dm.refresh_goals_panel(interaction.guild)
-            await interaction.followup.send("🗑️ 目標を削除しました。", ephemeral=True)
-        else:
-            await interaction.followup.send("エラー: 目標が見つかりません。", ephemeral=True)
+            
+            await interaction.followup.send(f"✅ **{self.task_name}** の目標を{action_text}しました。", ephemeral=True)
+            
+        except ValueError:
+            await interaction.followup.send("⚠️ 時間は半角数字で入力してください。", ephemeral=True)
 
 # ---------------------------------------------------------
 # 6. メインダッシュボード & タスク管理
@@ -767,30 +789,6 @@ class TaskManageView(discord.ui.View):
     async def edit_all_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         default_text = "\n".join([t["name"] for t in self.tasks])
         await interaction.response.send_modal(EditAllModal(self, default_text))
-
-    @discord.ui.button(label="👀 目標一覧", style=discord.ButtonStyle.secondary, row=1)
-    async def goal_list_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        dm = DataManager(self.bot)
-        goals = await dm.load_goals(interaction.guild)
-        if not goals:
-            await interaction.followup.send("設定なし", ephemeral=True)
-            return
-        embed = discord.Embed(title="🎯 目標設定一覧", color=discord.Color.blue())
-        for task, goal_list in goals.items():
-            if isinstance(goal_list, dict): goal_list = [goal_list]
-            value_text = ""
-            for info in goal_list:
-                p_code = info.get('period')
-                target = info.get('target')
-                p_text = "不明"
-                if p_code == 'daily': p_text = "1日"
-                elif p_code == 'weekly': p_text = "1週間"
-                elif p_code == 'monthly': p_text = "1ヶ月"
-                elif p_code == 'custom': p_text = f"{info.get('custom_days')}日間"
-                value_text += f"・{p_text} {target}分\n"
-            if value_text: embed.add_field(name=task, value=value_text, inline=False)
-        await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ---------------------------------------------------------
 # その他モーダル・View (省略なし)
