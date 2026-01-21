@@ -12,8 +12,10 @@ import io
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import matplotlib.font_manager as fm
+import matplotlib.patches as patches
 import pandas as pd
 import random
+import numpy as np
 
 # ---------------------------------------------------------
 # 1. サーバー維持機能
@@ -138,7 +140,7 @@ class DataManager:
         embed.timestamp = datetime.datetime.now()
         await channel.send(embed=embed)
 
-    async def fetch_logs(self, guild, limit=500):
+    async def fetch_logs(self, guild, limit=1000):
         channel = await self.get_channel(guild)
         logs = []
         async for msg in channel.history(limit=limit):
@@ -152,24 +154,30 @@ class DataManager:
         return logs
 
 # ---------------------------------------------------------
-# 4. グラフ生成クラス
+# 4. グラフ生成クラス (強化版 + タイムライン)
 # ---------------------------------------------------------
 class GraphGenerator:
     @staticmethod
-    def create_report_images(logs, days=7):
-        if not logs: return None
+    def create_report_images(logs, days=30):
+        if not logs: return None, None
         df = pd.DataFrame(logs)
-        if df.empty: return None
+        if df.empty: return None, None
         
         df['date_obj'] = pd.to_datetime(df['date'])
+        if 'timestamp' in df.columns:
+             df['timestamp_obj'] = pd.to_datetime(df['timestamp'])
+        else:
+             df['timestamp_obj'] = df['date_obj']
+
         cutoff_date = pd.Timestamp.now() - pd.Timedelta(days=days)
         df = df[df['date_obj'] >= cutoff_date]
         
-        if df.empty: return None
+        if df.empty: return None, None
 
         images = {}
         fp = fm.FontProperties(fname=FONT_PATH, size=14) if os.path.exists(FONT_PATH) else None
 
+        # 1. 円グラフ
         plt.figure(figsize=(10, 6))
         task_sum = df.groupby('task')['duration_min'].sum()
         if not task_sum.empty:
@@ -189,12 +197,13 @@ class GraphGenerator:
             images['pie'] = buf_pie
             plt.close()
 
+        # 2. 積み上げ棒グラフ
         plt.figure(figsize=(12, 6))
         pivot_df = df.pivot_table(index='date', columns='task', values='duration_min', aggfunc='sum', fill_value=0)
         if not pivot_df.empty:
-            pivot_df = pivot_df.sort_index().tail(14)
-            ax = pivot_df.plot(kind='bar', stacked=True, colormap='Pastel1', figsize=(12, 6))
-            plt.title("日別積み上げグラフ", fontproperties=fp, fontsize=16)
+            display_pivot = pivot_df.sort_index().tail(14)
+            ax = display_pivot.plot(kind='bar', stacked=True, colormap='Pastel1', figsize=(12, 6))
+            plt.title("日別積み上げグラフ (直近14日)", fontproperties=fp, fontsize=16)
             plt.xlabel("日付", fontproperties=fp)
             plt.ylabel("時間 (分)", fontproperties=fp)
             plt.legend(prop=fp, bbox_to_anchor=(1.05, 1), loc='upper left')
@@ -206,7 +215,127 @@ class GraphGenerator:
             images['bar'] = buf_bar
             plt.close()
 
-        return images
+        # 3. ヒートマップ
+        plt.figure(figsize=(10, 5))
+        df['weekday'] = df['timestamp_obj'].dt.weekday
+        df['hour'] = df['timestamp_obj'].dt.hour
+        heatmap_data = df.pivot_table(index='weekday', columns='hour', values='duration_min', aggfunc='count', fill_value=0)
+        heatmap_data = heatmap_data.reindex(index=range(7), columns=range(24), fill_value=0)
+        
+        plt.imshow(heatmap_data, cmap='Blues', aspect='auto')
+        days_label = ['月', '火', '水', '木', '金', '土', '日']
+        plt.yticks(range(7), days_label, fontproperties=fp)
+        plt.xticks(range(24), [str(h) for h in range(24)], fontproperties=fp)
+        plt.xlabel("時間帯 (時)", fontproperties=fp)
+        plt.ylabel("曜日", fontproperties=fp)
+        plt.title("活動リズム ヒートマップ (濃い=頻度高)", fontproperties=fp, fontsize=16)
+        plt.colorbar(label="回数", pad=0.02)
+        plt.tight_layout()
+        buf_heat = io.BytesIO()
+        plt.savefig(buf_heat, format='png')
+        buf_heat.seek(0)
+        images['heatmap'] = buf_heat
+        plt.close()
+
+        stats = {
+            "total_time_min": int(df['duration_min'].sum()),
+            "total_tasks": int(len(df)),
+            "days_active": int(df['date'].nunique()),
+            "most_frequent_task": df['task'].mode()[0] if not df['task'].mode().empty else "なし",
+            "most_time_task": task_sum.idxmax() if not task_sum.empty else "なし",
+            "daily_average_min": int(df['duration_min'].sum() / days) if days > 0 else 0
+        }
+
+        return images, stats
+
+    @staticmethod
+    def create_daily_timeline(logs, target_date=None):
+        if not logs: return None
+        df = pd.DataFrame(logs)
+        if df.empty: return None
+
+        if 'timestamp' in df.columns:
+             df['end_time'] = pd.to_datetime(df['timestamp'])
+        else:
+             df['end_time'] = pd.to_datetime(df['date']) # フォールバック
+
+        # ターゲット日付（デフォルトは今日）
+        if target_date is None:
+            target_date = datetime.date.today()
+        
+        # 文字列型を日付型に変換してフィルタ
+        df['date_only'] = df['end_time'].dt.date
+        df = df[df['date_only'] == target_date].copy()
+        
+        if df.empty: return None
+
+        # 開始時刻を逆算 (終了時刻 - 所要時間)
+        df['start_time'] = df['end_time'] - pd.to_timedelta(df['duration_min'], unit='m')
+
+        # 描画設定
+        fp = fm.FontProperties(fname=FONT_PATH, size=12) if os.path.exists(FONT_PATH) else None
+        fp_bold = fm.FontProperties(fname=FONT_PATH, size=14, weight='bold') if os.path.exists(FONT_PATH) else None
+        
+        # 縦長のキャンバス
+        fig, ax = plt.subplots(figsize=(8, 12))
+        ax.set_xlim(0, 100) # 横幅は適当な単位
+        ax.set_ylim(24, 0)  # 上が0時、下が24時
+        
+        # 背景色とグリッド
+        ax.set_facecolor('#f8f9fa')
+        ax.grid(axis='y', linestyle='--', alpha=0.5, color='#dee2e6')
+        
+        # Y軸の目盛り (1時間ごと)
+        ax.set_yticks(range(0, 25))
+        ax.set_yticklabels([f"{h:02d}:00" for h in range(25)], fontsize=10, fontproperties=fp)
+        
+        # カラーパレット生成（タスクごとに色を固定）
+        unique_tasks = df['task'].unique()
+        cmap = plt.cm.get_cmap('Pastel1', len(unique_tasks))
+        task_colors = {task: cmap(i) for i, task in enumerate(unique_tasks)}
+
+        # タスクを描画
+        for _, row in df.iterrows():
+            start_h = row['start_time'].hour + row['start_time'].minute / 60
+            end_h = row['end_time'].hour + row['end_time'].minute / 60
+            
+            # 日をまたぐ場合の補正（簡易的に0〜24時に収める）
+            if start_h < 0: start_h = 0
+            if end_h > 24: end_h = 24
+            
+            duration_h = end_h - start_h
+            if duration_h <= 0: continue # 時間が計算できない場合はスキップ
+            
+            # バーを描画 (Rectangle)
+            # x=15から幅10のバーを描く
+            rect = patches.Rectangle((15, start_h), 10, duration_h, linewidth=1, edgecolor='white', facecolor=task_colors[row['task']])
+            ax.add_patch(rect)
+            
+            # テキスト情報 (時刻とタスク名)
+            time_str = f"{row['start_time'].strftime('%H:%M')} - {row['end_time'].strftime('%H:%M')}"
+            memo_str = f" ({row['memo']})" if row.get('memo') else ""
+            label_str = f"{time_str}\n{row['task']}{memo_str}"
+            
+            # バーの右側にテキスト配置
+            ax.text(28, start_h + (duration_h/2), label_str, va='center', ha='left', fontsize=11, fontproperties=fp, color='#495057')
+
+        # 軸の装飾
+        ax.set_xticks([]) # X軸の目盛りは不要
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['bottom'].set_visible(False)
+        ax.spines['left'].set_color('#ced4da')
+        
+        # タイトル
+        plt.title(f"DAILY TIMELINE - {target_date.strftime('%Y/%m/%d')}", fontproperties=fp_bold, pad=20)
+        
+        plt.tight_layout()
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', dpi=100)
+        buf.seek(0)
+        plt.close()
+        
+        return buf
 
 # ---------------------------------------------------------
 # 5. UI: タスク管理 & メインダッシュボード
@@ -423,28 +552,24 @@ class DashboardView(discord.ui.View):
         super().__init__(timeout=None)
         self.bot = bot
         
-        # レイアウト設定
         buttons_per_row = 3
         max_task_rows = 3
-        max_buttons = buttons_per_row * max_task_rows # 9個
+        max_buttons = buttons_per_row * max_task_rows
 
         main_tasks = tasks[:max_buttons]
         overflow_tasks = tasks[max_buttons:]
 
-        # メインのタスクをボタンとして配置 (3つごとに改行)
         for i, task in enumerate(main_tasks):
             row = i // buttons_per_row
             self.add_item(TaskButton(task["name"], task.get("style", "secondary"), row=row))
 
         if overflow_tasks:
-            # あふれたタスクは Row 3 (4行目)
             self.add_item(OverflowTaskSelect(overflow_tasks, row=3))
 
-        # 機能ボタンは Row 4 (5行目) に固定
         self.add_item(self.create_func_btn("📝 自由入力", discord.ButtonStyle.secondary, "free_input", self.free_input_btn))
-        self.add_item(self.create_func_btn("📊 レポート", discord.ButtonStyle.primary, "report", self.report_btn))
+        self.add_item(self.create_func_btn("📅 今日の記録", discord.ButtonStyle.primary, "daily", self.daily_btn)) # 追加
+        self.add_item(self.create_func_btn("📊 レポート", discord.ButtonStyle.secondary, "report", self.report_btn))
         self.add_item(self.create_func_btn("⚙️ 設定", discord.ButtonStyle.secondary, "manage", self.manage_btn))
-        self.add_item(self.create_func_btn("📂 CSV", discord.ButtonStyle.secondary, "csv", self.csv_btn))
         self.add_item(self.create_func_btn("🔄 再設置", discord.ButtonStyle.gray, "refresh", self.refresh_btn))
 
     def create_func_btn(self, label, style, custom_id_suffix, callback_func):
@@ -455,21 +580,62 @@ class DashboardView(discord.ui.View):
     async def free_input_btn(self, interaction: discord.Interaction):
         await interaction.response.send_modal(FreeTaskStartModal())
 
+    # デイリータイムライン生成ボタン
+    async def daily_btn(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        dm = DataManager(self.bot)
+        # 今日のログを取得するために、少し多めに取得してフィルタする
+        logs = await dm.fetch_logs(interaction.guild, limit=200)
+        
+        image_buf = GraphGenerator.create_daily_timeline(logs)
+        
+        if image_buf is None:
+            await interaction.followup.send("今日のデータはまだありません。", ephemeral=True)
+            return
+
+        file = discord.File(image_buf, filename="daily_timeline.png")
+        embed = discord.Embed(title="📅 今日のデイリータイムライン", color=discord.Color.blue())
+        embed.set_image(url="attachment://daily_timeline.png")
+        
+        await interaction.followup.send(embed=embed, file=file, ephemeral=True)
+
     async def report_btn(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         dm = DataManager(self.bot)
-        logs = await dm.fetch_logs(interaction.guild)
+        logs = await dm.fetch_logs(interaction.guild, limit=1000)
         if not logs:
             await interaction.followup.send("データが見つかりませんでした。", ephemeral=True)
             return
-        images = GraphGenerator.create_report_images(logs, days=7)
+            
+        days = 30
+        images, stats = GraphGenerator.create_report_images(logs, days=days)
         if not images:
-            await interaction.followup.send("過去7日間のデータがありません。", ephemeral=True)
+            await interaction.followup.send(f"過去{days}日間のデータがありません。", ephemeral=True)
             return
+        
         files = []
         if 'pie' in images: files.append(discord.File(images['pie'], filename="pie_chart.png"))
         if 'bar' in images: files.append(discord.File(images['bar'], filename="bar_chart.png"))
-        embed = discord.Embed(title="📊 行動レポート (過去7日間)", color=discord.Color.purple())
+        if 'heatmap' in images: files.append(discord.File(images['heatmap'], filename="heatmap.png"))
+        
+        embed = discord.Embed(title=f"📊 行動分析レポート (過去{days}日間)", color=discord.Color.purple())
+        
+        total_h = stats['total_time_min'] // 60
+        total_m = stats['total_time_min'] % 60
+        avg_h = stats['daily_average_min'] // 60
+        avg_m = stats['daily_average_min'] % 60
+        
+        summary_text = (
+            f"⏱️ **総活動時間**: {total_h}時間 {total_m}分\n"
+            f"📅 **記録日数**: {stats['days_active']}日\n"
+            f"🔄 **完了タスク数**: {stats['total_tasks']}回\n"
+            f"⚖️ **1日平均**: {avg_h}時間 {avg_m}分\n"
+            f"👑 **最多頻度タスク**: {stats['most_frequent_task']}\n"
+            f"⏳ **最多時間タスク**: {stats['most_time_task']}"
+        )
+        embed.add_field(name="📈 統計サマリー", value=summary_text, inline=False)
+        embed.add_field(name="🖼️ 添付グラフ", value="・行動内訳\n・日別推移\n・活動ヒートマップ", inline=False)
+        
         if 'pie' in images: embed.set_image(url="attachment://pie_chart.png")
         await interaction.followup.send(embed=embed, files=files, ephemeral=True)
 
