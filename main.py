@@ -133,10 +133,6 @@ class DataManager:
     async def get_frequent_tasks(self, guild, limit=20):
         """よく使うタスク順に並べ替えて返す"""
         logs = await self.fetch_logs(guild, limit=300)
-        
-        # デフォルトタスクの順序を維持しつつ、頻度情報を加味したいが、
-        # ここではシンプルに「登録されているタスクリスト」を正とする。
-        # (頻度順に並べ替えたい場合はここを調整)
         return None 
 
 # ---------------------------------------------------------
@@ -431,6 +427,7 @@ class DashboardView(discord.ui.View):
                 json_str = embed.footer.text.replace("LOG_ID:", "")
                 data = json.loads(json_str)
                 memo = data.get('memo', '').replace('"', '""')
+                # 過去のデータにRatingがあっても無視して保存
                 line = f"{data['date']},{data.get('timestamp', '')},{data['task']},{data['duration_min']},\"{memo}\""
                 csv_lines.append(line)
                 count += 1
@@ -461,6 +458,7 @@ class MemoModal(discord.ui.Modal, title='完了メモ'):
         self.task_name = task_name
         self.start_time = start_time
         self.view_item = view_item
+        
     async def on_submit(self, interaction: discord.Interaction):
         end_time = datetime.datetime.now()
         duration = end_time - self.start_time
@@ -483,6 +481,7 @@ class MemoModal(discord.ui.Modal, title='完了メモ'):
         embed = discord.Embed(title=f"✅ {praise}", color=discord.Color.gold())
         embed.add_field(name="内容", value=self.task_name)
         embed.add_field(name="時間", value=log_data['duration_str'])
+        
         if self.memo.value:
             embed.add_field(name="📝 メモ", value=self.memo.value, inline=False)
         
@@ -501,6 +500,7 @@ class FinishTaskView(discord.ui.View):
             time_str = embed.footer.text.replace("開始時刻: ", "")
             start_time = datetime.datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
             task_name = embed.title.replace("🚀 スタート: ", "")
+            # 評価画面を経由せず、直接メモモーダルを表示
             await interaction.response.send_modal(MemoModal(task_name, start_time, self))
         except:
             await interaction.response.send_message("エラー: タスク情報を読み取れませんでした。", ephemeral=True)
