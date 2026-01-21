@@ -35,12 +35,17 @@ def keep_alive():
     t.start()
 
 # ---------------------------------------------------------
-# 2. 設定・フォント読み込み
+# 2. 設定・定数
 # ---------------------------------------------------------
 TOKEN = os.getenv('DISCORD_TOKEN')
-DATA_CHANNEL_NAME = "mylifelog-data"
 
-# 褒め言葉リスト
+# チャンネル名の定義
+CH_DATA = "🔒データ保存用"
+CH_DASHBOARD = "🎮ダッシュボード"
+CH_TIMELINE = "📜タイムライン"
+VC_FOCUS = "🎙️集中ルーム"
+CAT_NAME = "MY LIFE LOG"
+
 PRAISE_MESSAGES = [
     "お疲れ様でした！素晴らしい集中力です✨",
     "ナイス！その調子でいきましょう🚀",
@@ -52,27 +57,26 @@ PRAISE_MESSAGES = [
     "えらい！すごすぎる！💯",
 ]
 
-# Discordのボタンスタイル定義
 BUTTON_STYLES = {
-    "primary": discord.ButtonStyle.primary,     # 青
-    "secondary": discord.ButtonStyle.secondary, # グレー
-    "success": discord.ButtonStyle.success,     # 緑
-    "danger": discord.ButtonStyle.danger        # 赤
+    "primary": discord.ButtonStyle.primary,
+    "secondary": discord.ButtonStyle.secondary,
+    "success": discord.ButtonStyle.success,
+    "danger": discord.ButtonStyle.danger
 }
 
-# 日本語フォントの設定
 FONT_PATH = "font.ttf"
 try:
     if os.path.exists(FONT_PATH):
         font_prop = fm.FontProperties(fname=FONT_PATH)
         plt.rcParams['font.family'] = font_prop.get_name()
     else:
-        print("【警告】font.ttfが見つかりません。日本語が文字化けする可能性があります。")
+        print("【警告】font.ttfが見つかりません。")
 except Exception as e:
     print(f"フォント設定エラー: {e}")
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.voice_states = True # ボイス状態の監視に必要
 client = commands.Bot(command_prefix='!', intents=intents)
 
 # ---------------------------------------------------------
@@ -81,7 +85,6 @@ client = commands.Bot(command_prefix='!', intents=intents)
 class DataManager:
     def __init__(self, bot):
         self.bot = bot
-        # データ構造: 辞書リスト
         self.default_tasks = [
             {"name": "🛁 お風呂", "style": "primary"},
             {"name": "💻 作業・勉強", "style": "primary"},
@@ -92,26 +95,39 @@ class DataManager:
             {"name": "🎮 趣味・休憩", "style": "success"}
         ]
 
-    async def get_channel(self, guild):
-        channel = discord.utils.get(guild.text_channels, name=DATA_CHANNEL_NAME)
-        if not channel:
-            overwrites = {
-                guild.default_role: discord.PermissionOverwrite(read_messages=False),
-                guild.me: discord.PermissionOverwrite(read_messages=True),
-            }
-            channel = await guild.create_text_channel(DATA_CHANNEL_NAME, overwrites=overwrites)
-        return channel
+    async def get_data_channel(self, guild):
+        """データ保存用チャンネルを取得（なければ作成）"""
+        # まず名前で探す（新構成）
+        channel = discord.utils.get(guild.text_channels, name=CH_DATA)
+        if channel: return channel
+        
+        # なければ旧名で探す
+        channel = discord.utils.get(guild.text_channels, name="mylifelog-data")
+        if channel: return channel
+
+        # どちらもなければ作成（とりあえずカテゴリなしで）
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            guild.me: discord.PermissionOverwrite(read_messages=True),
+        }
+        return await guild.create_text_channel(CH_DATA, overwrites=overwrites)
+
+    async def get_timeline_channel(self, guild):
+        """タイムラインチャンネルを取得（なければ作成した場所 or setupした場所）"""
+        channel = discord.utils.get(guild.text_channels, name=CH_TIMELINE)
+        if channel: return channel
+        # なければデータチャンネルと同じ場所へ（フォールバック）
+        return await self.get_data_channel(guild)
 
     async def load_tasks(self, guild):
-        channel = await self.get_channel(guild)
+        channel = await self.get_data_channel(guild)
         pins = await channel.pins()
         for msg in pins:
             if msg.content.startswith("CONFIG_TASKS:"):
                 try:
                     data = json.loads(msg.content.replace("CONFIG_TASKS:", ""))
-                    if data and isinstance(data[0], str):
-                        new_data = [{"name": t, "style": "secondary"} for t in data]
-                        return new_data
+                    if data and isinstance(data[0], str): # 旧形式互換
+                        return [{"name": t, "style": "secondary"} for t in data]
                     return data
                 except: pass
         
@@ -121,7 +137,7 @@ class DataManager:
         return initial_data
 
     async def save_tasks(self, guild, tasks):
-        channel = await self.get_channel(guild)
+        channel = await self.get_data_channel(guild)
         pins = await channel.pins()
         for msg in pins:
             if msg.content.startswith("CONFIG_TASKS:"):
@@ -131,17 +147,28 @@ class DataManager:
         await msg.pin()
 
     async def save_log(self, guild, log_data):
-        channel = await self.get_channel(guild)
+        # データはDataChannelへ
+        data_ch = await self.get_data_channel(guild)
+        
+        # ユーザーへの表示はTimelineChannelへ
+        timeline_ch = await self.get_timeline_channel(guild)
+
         embed = discord.Embed(title=f"✅ {log_data['task']}", color=discord.Color.green())
         embed.add_field(name="時間", value=f"{log_data['duration_str']}")
         if log_data.get('memo'):
             embed.add_field(name="📝 メモ", value=log_data['memo'], inline=False)
-        embed.set_footer(text=f"LOG_ID:{json.dumps(log_data, ensure_ascii=False)}")
+        embed.set_footer(text="Logged via MyLifeLog")
         embed.timestamp = datetime.datetime.now()
-        await channel.send(embed=embed)
+        
+        # タイムラインに表示
+        await timeline_ch.send(embed=embed)
+
+        # データ保存用（隠しデータ付き）
+        embed.set_footer(text=f"LOG_ID:{json.dumps(log_data, ensure_ascii=False)}")
+        await data_ch.send(embed=embed)
 
     async def fetch_logs(self, guild, limit=1000):
-        channel = await self.get_channel(guild)
+        channel = await self.get_data_channel(guild)
         logs = []
         async for msg in channel.history(limit=limit):
             if not msg.embeds: continue
@@ -153,8 +180,13 @@ class DataManager:
             except: continue
         return logs
 
+    # VC計測用の一時保存（ステートレスにするためチャンネルのトピックやメッセージを使いたいが、
+    # 頻繁な書き込み制限を避けるため、今回はメモリ上のキャッシュを使用する）
+    # ※Bot再起動でVC計測中のデータは消えるが、利便性優先
+    vc_sessions = {} # {user_id: start_time}
+
 # ---------------------------------------------------------
-# 4. グラフ生成クラス (強化版 + タイムライン)
+# 4. グラフ生成クラス
 # ---------------------------------------------------------
 class GraphGenerator:
     @staticmethod
@@ -177,7 +209,7 @@ class GraphGenerator:
         images = {}
         fp = fm.FontProperties(fname=FONT_PATH, size=14) if os.path.exists(FONT_PATH) else None
 
-        # 1. 円グラフ
+        # 円グラフ
         plt.figure(figsize=(10, 6))
         task_sum = df.groupby('task')['duration_min'].sum()
         if not task_sum.empty:
@@ -197,7 +229,7 @@ class GraphGenerator:
             images['pie'] = buf_pie
             plt.close()
 
-        # 2. 積み上げ棒グラフ
+        # 積み上げ棒グラフ
         plt.figure(figsize=(12, 6))
         pivot_df = df.pivot_table(index='date', columns='task', values='duration_min', aggfunc='sum', fill_value=0)
         if not pivot_df.empty:
@@ -215,7 +247,7 @@ class GraphGenerator:
             images['bar'] = buf_bar
             plt.close()
 
-        # 3. ヒートマップ
+        # ヒートマップ
         plt.figure(figsize=(10, 5))
         df['weekday'] = df['timestamp_obj'].dt.weekday
         df['hour'] = df['timestamp_obj'].dt.hour
@@ -257,88 +289,65 @@ class GraphGenerator:
         if 'timestamp' in df.columns:
              df['end_time'] = pd.to_datetime(df['timestamp'])
         else:
-             df['end_time'] = pd.to_datetime(df['date']) # フォールバック
+             df['end_time'] = pd.to_datetime(df['date'])
 
-        # ターゲット日付（デフォルトは今日）
         if target_date is None:
             target_date = datetime.date.today()
         
-        # 文字列型を日付型に変換してフィルタ
         df['date_only'] = df['end_time'].dt.date
         df = df[df['date_only'] == target_date].copy()
         
         if df.empty: return None
 
-        # 開始時刻を逆算 (終了時刻 - 所要時間)
         df['start_time'] = df['end_time'] - pd.to_timedelta(df['duration_min'], unit='m')
 
-        # 描画設定
         fp = fm.FontProperties(fname=FONT_PATH, size=12) if os.path.exists(FONT_PATH) else None
         fp_bold = fm.FontProperties(fname=FONT_PATH, size=14, weight='bold') if os.path.exists(FONT_PATH) else None
         
-        # 縦長のキャンバス
         fig, ax = plt.subplots(figsize=(8, 12))
-        ax.set_xlim(0, 100) # 横幅は適当な単位
-        ax.set_ylim(24, 0)  # 上が0時、下が24時
-        
-        # 背景色とグリッド
+        ax.set_xlim(0, 100)
+        ax.set_ylim(24, 0)
         ax.set_facecolor('#f8f9fa')
         ax.grid(axis='y', linestyle='--', alpha=0.5, color='#dee2e6')
-        
-        # Y軸の目盛り (1時間ごと)
         ax.set_yticks(range(0, 25))
         ax.set_yticklabels([f"{h:02d}:00" for h in range(25)], fontsize=10, fontproperties=fp)
         
-        # カラーパレット生成（タスクごとに色を固定）
         unique_tasks = df['task'].unique()
         cmap = plt.cm.get_cmap('Pastel1', len(unique_tasks))
         task_colors = {task: cmap(i) for i, task in enumerate(unique_tasks)}
 
-        # タスクを描画
         for _, row in df.iterrows():
             start_h = row['start_time'].hour + row['start_time'].minute / 60
             end_h = row['end_time'].hour + row['end_time'].minute / 60
-            
-            # 日をまたぐ場合の補正（簡易的に0〜24時に収める）
             if start_h < 0: start_h = 0
             if end_h > 24: end_h = 24
-            
             duration_h = end_h - start_h
-            if duration_h <= 0: continue # 時間が計算できない場合はスキップ
+            if duration_h <= 0: continue
             
-            # バーを描画 (Rectangle)
-            # x=15から幅10のバーを描く
             rect = patches.Rectangle((15, start_h), 10, duration_h, linewidth=1, edgecolor='white', facecolor=task_colors[row['task']])
             ax.add_patch(rect)
             
-            # テキスト情報 (時刻とタスク名)
             time_str = f"{row['start_time'].strftime('%H:%M')} - {row['end_time'].strftime('%H:%M')}"
             memo_str = f" ({row['memo']})" if row.get('memo') else ""
             label_str = f"{time_str}\n{row['task']}{memo_str}"
-            
-            # バーの右側にテキスト配置
             ax.text(28, start_h + (duration_h/2), label_str, va='center', ha='left', fontsize=11, fontproperties=fp, color='#495057')
 
-        # 軸の装飾
-        ax.set_xticks([]) # X軸の目盛りは不要
+        ax.set_xticks([])
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.spines['bottom'].set_visible(False)
         ax.spines['left'].set_color('#ced4da')
         
-        # タイトル
         plt.title(f"DAILY TIMELINE - {target_date.strftime('%Y/%m/%d')}", fontproperties=fp_bold, pad=20)
-        
         plt.tight_layout()
         buf = io.BytesIO()
         plt.savefig(buf, format='png', dpi=100)
         buf.seek(0)
         plt.close()
-        
         return buf
 
 # ---------------------------------------------------------
-# 5. UI: タスク管理 & メインダッシュボード
+# 5. UIコンポーネント
 # ---------------------------------------------------------
 class TaskManageView(discord.ui.View):
     def __init__(self, bot, guild, tasks):
@@ -351,7 +360,10 @@ class TaskManageView(discord.ui.View):
     async def refresh_panel_message(self, interaction):
         await self.dm.save_tasks(self.guild, self.tasks)
         await interaction.followup.send("✅ 設定を保存しました。新しいパネルを下に表示します。", ephemeral=True)
-        await interaction.channel.send("行動宣言パネル", view=DashboardView(self.bot, self.tasks))
+        # ダッシュボードチャンネルを探してそこに再表示推奨
+        dashboard_ch = discord.utils.get(self.guild.text_channels, name=CH_DASHBOARD)
+        target_ch = dashboard_ch if dashboard_ch else interaction.channel
+        await target_ch.send("行動宣言パネル", view=DashboardView(self.bot, self.tasks))
 
     @discord.ui.button(label="➕ 追加", style=discord.ButtonStyle.primary)
     async def add_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -503,8 +515,6 @@ class EditAllModal(discord.ui.Modal, title="並び替え・一括編集"):
         else:
             await interaction.followup.send("タスクが空です。", ephemeral=True)
 
-# --- Dashboard Components ---
-
 class FreeTaskStartModal(discord.ui.Modal, title="自由入力でスタート"):
     task_name = discord.ui.TextInput(label="今からやることは？", placeholder="例: 電球交換、ゴミ捨て")
     async def on_submit(self, interaction: discord.Interaction):
@@ -567,7 +577,7 @@ class DashboardView(discord.ui.View):
             self.add_item(OverflowTaskSelect(overflow_tasks, row=3))
 
         self.add_item(self.create_func_btn("📝 自由入力", discord.ButtonStyle.secondary, "free_input", self.free_input_btn))
-        self.add_item(self.create_func_btn("📅 今日の記録", discord.ButtonStyle.primary, "daily", self.daily_btn)) # 追加
+        self.add_item(self.create_func_btn("📅 今日の記録", discord.ButtonStyle.primary, "daily", self.daily_btn))
         self.add_item(self.create_func_btn("📊 レポート", discord.ButtonStyle.secondary, "report", self.report_btn))
         self.add_item(self.create_func_btn("⚙️ 設定", discord.ButtonStyle.secondary, "manage", self.manage_btn))
         self.add_item(self.create_func_btn("🔄 再設置", discord.ButtonStyle.gray, "refresh", self.refresh_btn))
@@ -580,11 +590,9 @@ class DashboardView(discord.ui.View):
     async def free_input_btn(self, interaction: discord.Interaction):
         await interaction.response.send_modal(FreeTaskStartModal())
 
-    # デイリータイムライン生成ボタン
     async def daily_btn(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         dm = DataManager(self.bot)
-        # 今日のログを取得するために、少し多めに取得してフィルタする
         logs = await dm.fetch_logs(interaction.guild, limit=200)
         
         image_buf = GraphGenerator.create_daily_timeline(logs)
@@ -596,7 +604,6 @@ class DashboardView(discord.ui.View):
         file = discord.File(image_buf, filename="daily_timeline.png")
         embed = discord.Embed(title="📅 今日のデイリータイムライン", color=discord.Color.blue())
         embed.set_image(url="attachment://daily_timeline.png")
-        
         await interaction.followup.send(embed=embed, file=file, ephemeral=True)
 
     async def report_btn(self, interaction: discord.Interaction):
@@ -678,7 +685,10 @@ class DashboardView(discord.ui.View):
         try:
             await interaction.message.delete()
         except: pass
-        await interaction.channel.send("行動宣言パネル", view=DashboardView(self.bot, tasks))
+        # 設置場所はダッシュボードチャンネル優先
+        dashboard_ch = discord.utils.get(self.bot.guilds[0].text_channels, name=CH_DASHBOARD)
+        target_ch = dashboard_ch if dashboard_ch else interaction.channel
+        await target_ch.send("行動宣言パネル", view=DashboardView(self.bot, tasks))
 
 # ---------------------------------------------------------
 # 6. 完了処理View
@@ -741,7 +751,46 @@ class FinishTaskView(discord.ui.View):
             await interaction.response.send_message("エラー: タスク情報を読み取れませんでした。", ephemeral=True)
 
 # ---------------------------------------------------------
-# 7. 起動 & コマンド定義
+# 7. ボイスチャンネル・イベントハンドラ
+# ---------------------------------------------------------
+@client.event
+async def on_voice_state_update(member, before, after):
+    if member.bot: return
+    dm = DataManager(client)
+    
+    # 集中ルームに入室したとき
+    if after.channel and after.channel.name == VC_FOCUS:
+        start_time = datetime.datetime.now()
+        dm.vc_sessions[member.id] = start_time
+        
+        # タイムラインに通知
+        timeline_ch = await dm.get_timeline_channel(member.guild)
+        start_str = start_time.strftime("%H:%M")
+        embed = discord.Embed(description=f"🎙️ **{member.display_name}** さんが集中ルームに入室しました。\n計測を開始します... ({start_str})", color=discord.Color.blue())
+        await timeline_ch.send(embed=embed)
+
+    # 集中ルームから退室（または移動）したとき
+    if before.channel and before.channel.name == VC_FOCUS:
+        start_time = dm.vc_sessions.pop(member.id, None)
+        if start_time:
+            end_time = datetime.datetime.now()
+            duration = end_time - start_time
+            minutes = int(duration.total_seconds() // 60)
+            seconds = int(duration.total_seconds() % 60)
+            
+            # ログ保存
+            log_data = {
+                "task": "💻 作業・勉強 (VC)",
+                "duration_min": minutes,
+                "duration_str": f"{minutes}分 {seconds}秒",
+                "memo": "集中ルーム自動計測",
+                "date": end_time.strftime("%Y-%m-%d"),
+                "timestamp": end_time.isoformat()
+            }
+            await dm.save_log(member.guild, log_data)
+
+# ---------------------------------------------------------
+# 8. 起動 & コマンド定義
 # ---------------------------------------------------------
 @client.event
 async def on_ready():
@@ -750,7 +799,56 @@ async def on_ready():
     client.add_view(FinishTaskView())
     client.add_view(DashboardView(client, [{"name": "Loading...", "style": "secondary"}]))
 
-@client.tree.command(name="setup", description="ダッシュボード(行動宣言パネル)を設置します")
+@client.tree.command(name="setup_server", description="【推奨】サーバーのチャンネル構成を自動セットアップします")
+async def setup_server(interaction: discord.Interaction):
+    await interaction.response.defer()
+    guild = interaction.guild
+    
+    # カテゴリ作成
+    category = discord.utils.get(guild.categories, name=CAT_NAME)
+    if not category:
+        category = await guild.create_category(CAT_NAME)
+
+    # 1. ダッシュボード（書き込み不可、操作専用）
+    dash_ch = discord.utils.get(guild.text_channels, name=CH_DASHBOARD)
+    if not dash_ch:
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(send_messages=False),
+            guild.me: discord.PermissionOverwrite(send_messages=True)
+        }
+        dash_ch = await guild.create_text_channel(CH_DASHBOARD, category=category, overwrites=overwrites)
+    
+    # 2. タイムライン（ログ表示用）
+    time_ch = discord.utils.get(guild.text_channels, name=CH_TIMELINE)
+    if not time_ch:
+        time_ch = await guild.create_text_channel(CH_TIMELINE, category=category)
+
+    # 3. データ保存用（非表示）
+    data_ch = discord.utils.get(guild.text_channels, name=CH_DATA)
+    if not data_ch:
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            guild.me: discord.PermissionOverwrite(read_messages=True)
+        }
+        data_ch = await guild.create_text_channel(CH_DATA, category=category, overwrites=overwrites)
+    
+    # 4. 集中ルーム（ボイス）
+    vc_ch = discord.utils.get(guild.voice_channels, name=VC_FOCUS)
+    if not vc_ch:
+        await guild.create_voice_channel(VC_FOCUS, category=category)
+
+    # パネル設置
+    dm = DataManager(client)
+    tasks = await dm.load_tasks(guild)
+    
+    # 古いパネルがあれば消したいが、特定できないので新規投稿
+    await dash_ch.purge(limit=5) # 掃除
+    await dash_ch.send("行動宣言パネル", view=DashboardView(client, tasks))
+
+    await interaction.followup.send("✅ サーバー構成を最適化しました！\n`🎮ダッシュボード` チャンネルから操作を開始してください。", ephemeral=True)
+
+# 旧コマンドも互換性のため残すが、基本はsetup_server推奨
+@client.tree.command(name="setup", description="現在のチャンネルにパネルを設置します")
 async def setup(interaction: discord.Interaction):
     await interaction.response.defer()
     dm = DataManager(client)
