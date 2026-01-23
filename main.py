@@ -842,6 +842,41 @@ class GoalManagePanel(discord.ui.View):
                 value_text += f"・{p_text} {target}分\n"
             if value_text: embed.add_field(name=task, value=value_text, inline=False)
         await interaction.followup.send(embed=embed, ephemeral=True)
+    # 進捗確認ボタンを目標管理パネルに追加
+    @discord.ui.button(label="🔥 進捗確認", style=discord.ButtonStyle.primary, custom_id="goal_panel_progress", row=1)
+    async def progress_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        dm = DataManager(self.bot)
+        logs = await dm.fetch_logs(interaction.guild, limit=1000)
+        goals = await dm.load_goals(interaction.guild)
+        
+        if not goals:
+            await interaction.followup.send("目標が設定されていません。", ephemeral=True)
+            return
+            
+        progress_data = GraphGenerator.calculate_progress(logs, goals)
+        
+        if not progress_data:
+            await interaction.followup.send("進捗データがありません。", ephemeral=True)
+            return
+            
+        embed = discord.Embed(title="🔥 目標進捗状況", color=discord.Color.orange())
+        
+        for p in progress_data:
+            bar_len = 10
+            filled = int(bar_len * (p['percent'] / 100))
+            bar = "▓" * filled + "░" * (bar_len - filled)
+            
+            value_str = f"{p['current']}/{p['target']}分"
+            
+            embed.add_field(
+                name=f"{p['task']} ({p['period_label']})",
+                value=f"`[{bar}]` **{p['percent']}%** ({value_str})",
+                inline=False
+            )
+            
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
 
 class GoalListActionView(discord.ui.View):
     def __init__(self, bot, options):
@@ -964,30 +999,25 @@ class DashboardView(discord.ui.View):
         super().__init__(timeout=None)
         self.bot = bot
         
-        # タスクボタンの配置 (2行分、6個まで)
+        # タスクボタンの配置 (最大9個、3個/行)
         buttons_per_row = 3
-        max_task_rows = 2 # 2行に制限 (Row 0, 1)
-        max_buttons = buttons_per_row * max_task_rows # 6個
+        # Row 0, 1, 2 を使用 (3行 x 3 = 9個)
+        # もしタスクが10個以上あっても、9個までしか表示しない仕様とする
+        
+        limit = 9
+        display_tasks = tasks[:limit]
 
-        main_tasks = tasks[:max_buttons]
-        overflow_tasks = tasks[max_buttons:]
-
-        for i, task in enumerate(main_tasks):
+        for i, task in enumerate(display_tasks):
             row = i // buttons_per_row
             self.add_item(TaskButton(task["name"], task.get("style", "secondary"), row=row))
 
-        # あふれたタスク (Row 2)
-        if overflow_tasks:
-            self.add_item(OverflowTaskSelect(overflow_tasks, row=2))
-
-        # 機能ボタン群1 (Row 3 - 5個)
+        # 機能ボタン群 (Row 3 - 4個)
         self.add_item(self.create_func_btn("📝 自由入力", discord.ButtonStyle.secondary, "free_input", self.free_input_btn, 3))
-        self.add_item(self.create_func_btn("📅 今日の記録", discord.ButtonStyle.secondary, "daily_today", self.daily_today_btn, 3))
-        self.add_item(self.create_func_btn("📅 昨日の記録", discord.ButtonStyle.secondary, "daily_yesterday", self.daily_yesterday_btn, 3))
+        self.add_item(self.create_func_btn("📅 今日", discord.ButtonStyle.secondary, "daily_today", self.daily_today_btn, 3))
+        self.add_item(self.create_func_btn("📅 昨日", discord.ButtonStyle.secondary, "daily_yesterday", self.daily_yesterday_btn, 3))
         self.add_item(self.create_func_btn("📊 レポート", discord.ButtonStyle.secondary, "report", self.report_btn, 3))
-        self.add_item(self.create_func_btn("🔥 進捗", discord.ButtonStyle.primary, "progress", self.progress_btn, 3))
 
-        # 機能ボタン群2 (Row 4 - 2個)
+        # 機能ボタン群 (Row 4 - 2個)
         self.add_item(self.create_func_btn("⚙️ 設定", discord.ButtonStyle.secondary, "manage", self.manage_btn, 4))
         self.add_item(self.create_func_btn("🔄 再設置", discord.ButtonStyle.gray, "refresh", self.refresh_btn, 4))
 
@@ -1030,30 +1060,6 @@ class DashboardView(discord.ui.View):
         view = ReportConfigView(self.bot, tasks)
         await interaction.followup.send("📊 **レポート設定**\n条件を選択して「レポート生成」を押してください。", view=view, ephemeral=True)
 
-    async def progress_btn(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        dm = DataManager(self.bot)
-        logs = await dm.fetch_logs(interaction.guild, limit=1000)
-        goals = await dm.load_goals(interaction.guild)
-        if not goals:
-            await interaction.followup.send("目標なし")
-            await resend_dashboard(interaction, self.bot)
-            return
-        progress_data = GraphGenerator.calculate_progress(logs, goals)
-        if not progress_data:
-            await interaction.followup.send("データなし")
-            await resend_dashboard(interaction, self.bot)
-            return
-        embed = discord.Embed(title="🔥 目標進捗状況", color=discord.Color.orange())
-        for p in progress_data:
-            bar_len = 10
-            filled = int(bar_len * (p['percent'] / 100))
-            bar = "▓" * filled + "░" * (bar_len - filled)
-            value_str = f"{p['current']}/{p['target']}分"
-            embed.add_field(name=f"{p['task']} ({p['period_label']})", value=f"`[{bar}]` **{p['percent']}%** ({value_str})", inline=False)
-        await interaction.followup.send(embed=embed)
-        await resend_dashboard(interaction, self.bot)
-
     async def manage_btn(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         dm = DataManager(self.bot)
@@ -1095,31 +1101,8 @@ class TaskManageView(discord.ui.View):
     async def edit_all_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         default_text = "\n".join([t["name"] for t in self.tasks])
         await interaction.response.send_modal(EditAllModal(self, default_text))
-    @discord.ui.button(label="👀 目標一覧", style=discord.ButtonStyle.secondary, row=1)
-    async def goal_list_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        dm = DataManager(self.bot)
-        goals = await dm.load_goals(interaction.guild)
-        if not goals:
-            await interaction.followup.send("設定なし")
-            await resend_dashboard(interaction, self.bot)
-            return
-        embed = discord.Embed(title="🎯 目標設定一覧", color=discord.Color.blue())
-        for task, goal_list in goals.items():
-            if isinstance(goal_list, dict): goal_list = [goal_list]
-            value_text = ""
-            for info in goal_list:
-                p_code = info.get('period')
-                target = info.get('target')
-                p_text = "不明"
-                if p_code == 'daily': p_text = "1日"
-                elif p_code == 'weekly': p_text = "1週間"
-                elif p_code == 'monthly': p_text = "1ヶ月"
-                elif p_code == 'custom': p_text = f"{info.get('custom_days')}日間"
-                value_text += f"・{p_text} {target}分\n"
-            if value_text: embed.add_field(name=task, value=value_text, inline=False)
-        await interaction.followup.send(embed=embed)
-        await resend_dashboard(interaction, self.bot)
+
+    # 目標関連のボタンはここからは削除し、GoalManagePanelに集約済
 
 class AddTaskModal(discord.ui.Modal, title="タスクの追加"):
     name = discord.ui.TextInput(label="タスク名", placeholder="例: 🏃 ランニング")
@@ -1267,19 +1250,6 @@ class TaskButton(discord.ui.Button):
         timestamp = int(now.timestamp())
         description = f"**{start_str}**\n経過: <t:{timestamp}:R>"
         embed = discord.Embed(title=f"🚀 スタート: {self.task_name}", description=description, color=discord.Color.blue())
-        await interaction.response.send_message(embed=embed, view=FinishTaskView())
-
-class OverflowTaskSelect(discord.ui.Select):
-    def __init__(self, tasks, row=3):
-        options = [discord.SelectOption(label=t["name"][:100]) for t in tasks]
-        super().__init__(placeholder="⏬ その他のタスク...", options=options, custom_id="dashboard_overflow_select", row=row)
-    async def callback(self, interaction: discord.Interaction):
-        selected = self.values[0]
-        now = datetime.datetime.now(JST)
-        start_str = now.strftime("%Y-%m-%d %H:%M:%S")
-        timestamp = int(now.timestamp())
-        description = f"**{start_str}**\n経過: <t:{timestamp}:R>"
-        embed = discord.Embed(title=f"🚀 スタート: {selected}", description=description, color=discord.Color.blue())
         await interaction.response.send_message(embed=embed, view=FinishTaskView())
 
 class MemoModal(discord.ui.Modal, title='完了メモ'):
