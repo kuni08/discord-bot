@@ -44,7 +44,7 @@ CH_DATA = "🔒データ保存用"
 CH_DASHBOARD = "🎮ダッシュボード"
 CH_TIMELINE = "📜タイムライン"
 CH_GOALS = "🎯目標管理"
-CH_REPORT = "📊レポート" # 新規追加
+CH_REPORT = "📊レポート"
 CAT_NAME = "MY LIFE LOG"
 
 # 日本時間（JST）の定義
@@ -90,11 +90,9 @@ async def resend_dashboard(interaction, bot):
     dm = DataManager(bot)
     tasks = await dm.load_tasks(interaction.guild)
     
-    # ダッシュボードチャンネルを特定、なければ現在のチャンネル
     dashboard_ch = discord.utils.get(interaction.guild.text_channels, name=CH_DASHBOARD)
     target_ch = dashboard_ch if dashboard_ch else interaction.channel
     
-    # 古いパネルを消す努力をする（直近のBotメッセージをチェック）
     try:
         async for msg in target_ch.history(limit=5):
             if msg.author == bot.user and msg.content == "行動宣言パネル":
@@ -149,7 +147,7 @@ class DataManager:
     async def get_goals_channel(self, guild):
         return await self.get_channel_by_name(guild, CH_GOALS)
 
-    async def get_report_channel(self, guild): # 新規追加
+    async def get_report_channel(self, guild):
         return await self.get_channel_by_name(guild, CH_REPORT)
 
     async def load_tasks(self, guild):
@@ -302,6 +300,35 @@ class GraphGenerator:
         return None
 
     @staticmethod
+    def combine_images(image_buffers):
+        """複数の画像バッファを1枚の画像に結合する"""
+        if not image_buffers: return None
+        
+        # 読み込み
+        images = [plt.imread(buf) for buf in image_buffers]
+        n = len(images)
+        if n == 1: return image_buffers[0] # 1枚ならそのまま
+        
+        # レイアウト計算 (基本2列)
+        cols = 2 if n > 1 else 1
+        rows = (n + 1) // 2
+        
+        # 簡易的にフィギュアサイズを計算
+        fig = plt.figure(figsize=(10 * cols, 8 * rows))
+        
+        for i, img in enumerate(images):
+            ax = fig.add_subplot(rows, cols, i+1)
+            ax.imshow(img)
+            ax.axis('off')
+            
+        plt.tight_layout()
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png')
+        buf.seek(0)
+        plt.close()
+        return buf
+
+    @staticmethod
     def create_pie_chart(logs, start_date, end_date, tasks_filter):
         df = GraphGenerator._prepare_df(logs, start_date, end_date, tasks_filter)
         if df is None: return None
@@ -396,45 +423,60 @@ class GraphGenerator:
         return buf
 
     @staticmethod
-    def create_timeline_stack(logs, start_date, end_date, tasks_filter):
+    def create_timeline_vertical(logs, start_date, end_date, tasks_filter):
+        """縦長（Vertical）タイムライン"""
         df = GraphGenerator._prepare_df(logs, start_date, end_date, tasks_filter)
         if df is None: return None
         fp = GraphGenerator.get_font_prop(size=12)
+        
         df['date_only'] = df['ts_obj'].dt.date
         df['end_time'] = df['ts_obj']
         df['start_time'] = df['end_time'] - pd.to_timedelta(df['duration_min'], unit='m')
+        
         dates = sorted(df['date_only'].unique())
+        # 日数が多い場合は直近30日に制限
         if len(dates) > 30:
              dates = dates[-30:]
              df = df[df['date_only'].isin(dates)]
-        fig, ax = plt.subplots(figsize=(10, len(dates) * 0.5 + 2))
-        ax.set_xlim(0, 24)
-        ax.set_ylim(-0.5, len(dates) - 0.5)
+             
+        # 縦軸: 時間(24-0), 横軸: 日付
+        fig, ax = plt.subplots(figsize=(len(dates) * 1.5 + 2, 10))
+        ax.set_xlim(-0.5, len(dates) - 0.5)
+        ax.set_ylim(24, 0) # 0時が上
+        
         unique_tasks = df['task'].unique()
         cmap = plt.cm.get_cmap('Pastel1', len(unique_tasks))
         task_colors = {task: cmap(i) for i, task in enumerate(unique_tasks)}
+        
         legend_handles = []
         for task, color in task_colors.items():
             legend_handles.append(patches.Patch(color=color, label=task))
+
         for i, target_date in enumerate(dates):
             day_df = df[df['date_only'] == target_date]
             for _, row in day_df.iterrows():
                 start_h = row['start_time'].hour + row['start_time'].minute / 60
                 end_h = row['end_time'].hour + row['end_time'].minute / 60
+                
+                # 日跨ぎ補正
                 if start_h < 0: start_h = 0
                 if end_h > 24: end_h = 24
                 duration_h = end_h - start_h
                 if duration_h <= 0: continue
-                rect = patches.Rectangle((start_h, i - 0.3), duration_h, 0.6, facecolor=task_colors[row['task']], edgecolor='white')
+                
+                # 縦長のバーを描画
+                rect = patches.Rectangle((i - 0.4, start_h), 0.8, duration_h, facecolor=task_colors[row['task']], edgecolor='white')
                 ax.add_patch(rect)
-        ax.set_yticks(range(len(dates)))
-        ax.set_yticklabels([d.strftime('%m/%d') for d in dates], fontproperties=fp)
-        ax.set_xticks(range(0, 25, 2))
-        ax.set_xlabel("時刻", fontproperties=fp)
-        ax.grid(axis='x', linestyle='--', alpha=0.5)
-        plt.title(f"タイムライン・スタック ({len(dates)}日間)", fontproperties=fp, fontsize=16)
+
+        ax.set_xticks(range(len(dates)))
+        ax.set_xticklabels([d.strftime('%m/%d') for d in dates], fontproperties=fp, rotation=45)
+        ax.set_ylabel("時刻", fontproperties=fp)
+        ax.grid(axis='y', linestyle='--', alpha=0.5)
+        
+        plt.title(f"タイムライン ({len(dates)}日間)", fontproperties=fp, fontsize=16)
         plt.legend(handles=legend_handles, bbox_to_anchor=(1.05, 1), loc='upper left', prop=fp)
         plt.tight_layout()
+        
         buf = io.BytesIO()
         plt.savefig(buf, format='png')
         buf.seek(0)
@@ -573,13 +615,15 @@ class ReportConfigView(discord.ui.View):
         self.tasks = tasks
         self.period = "30days"
         self.selected_tasks = []
-        self.chart_type = "pie"
+        self.selected_charts = ["pie"] # リストに変更
+        self.layout = "combined" # combined or separate
         self.custom_start = None
         self.custom_end = None
         
         self.add_item(ReportPeriodSelect())
         self.add_item(ReportTaskSelect(tasks))
         self.add_item(ReportChartSelect())
+        self.add_item(ReportLayoutSelect())
         self.add_item(ReportGenerateButton())
 
 class ReportPeriodSelect(discord.ui.Select):
@@ -594,7 +638,7 @@ class ReportPeriodSelect(discord.ui.Select):
             discord.SelectOption(label="全期間", value="all"),
             discord.SelectOption(label="期間を指定 (日付入力)", value="custom"),
         ]
-        super().__init__(placeholder="期間を選択 (デフォルト: 過去30日)", options=options, row=0)
+        super().__init__(placeholder="📅 期間 (デフォルト: 過去30日)", options=options, row=0)
     async def callback(self, interaction: discord.Interaction):
         self.view.period = self.values[0]
         if self.values[0] == "custom":
@@ -619,7 +663,7 @@ class ReportTaskSelect(discord.ui.Select):
         options = []
         for t in tasks[:25]:
             options.append(discord.SelectOption(label=t["name"]))
-        super().__init__(placeholder="タスクを選択 (未選択で全て)", options=options, min_values=0, max_values=len(options), row=1)
+        super().__init__(placeholder="✅ タスク (未選択で全て)", options=options, min_values=0, max_values=len(options), row=1)
     async def callback(self, interaction: discord.Interaction):
         self.view.selected_tasks = self.values
         await interaction.response.defer()
@@ -627,20 +671,32 @@ class ReportTaskSelect(discord.ui.Select):
 class ReportChartSelect(discord.ui.Select):
     def __init__(self):
         options = [
-            discord.SelectOption(label="円グラフ (割合)", value="pie", default=True),
+            discord.SelectOption(label="円グラフ (割合)", value="pie"),
             discord.SelectOption(label="積み上げ棒グラフ (推移)", value="bar"),
             discord.SelectOption(label="ヒートマップ (曜日×時間)", value="heatmap"),
             discord.SelectOption(label="パンチカード (活動密度)", value="punch"),
-            discord.SelectOption(label="タイムライン (時系列)", value="timeline"),
+            discord.SelectOption(label="タイムライン (時系列・縦長)", value="timeline"),
         ]
-        super().__init__(placeholder="グラフの種類を選択", options=options, row=2)
+        # 複数選択可能に
+        super().__init__(placeholder="📈 グラフ種類 (複数選択可)", options=options, min_values=1, max_values=5, row=2)
     async def callback(self, interaction: discord.Interaction):
-        self.view.chart_type = self.values[0]
+        self.view.selected_charts = self.values
+        await interaction.response.defer()
+
+class ReportLayoutSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="1枚の画像にまとめる", value="combined", description="複数のグラフを結合して出力", default=True),
+            discord.SelectOption(label="個別に出力する", value="separate", description="グラフごとに別の画像として出力"),
+        ]
+        super().__init__(placeholder="🖼️ 出力形式", options=options, row=3)
+    async def callback(self, interaction: discord.Interaction):
+        self.view.layout = self.values[0]
         await interaction.response.defer()
 
 class ReportGenerateButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="レポート生成", style=discord.ButtonStyle.primary, row=3)
+        super().__init__(label="レポート生成", style=discord.ButtonStyle.primary, row=4)
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer()
         view = self.view
@@ -673,43 +729,75 @@ class ReportGenerateButton(discord.ui.Button):
         dm = DataManager(view.bot)
         logs = await dm.fetch_logs(interaction.guild, limit=2000)
         
-        buf = None
-        title = "レポート"
-        if view.chart_type == "pie":
-            buf = GraphGenerator.create_pie_chart(logs, start_date, end_date, view.selected_tasks)
-            title = "円グラフ"
-        elif view.chart_type == "bar":
-            buf = GraphGenerator.create_bar_chart(logs, start_date, end_date, view.selected_tasks)
-            title = "積み上げ棒グラフ"
-        elif view.chart_type == "heatmap":
-            buf = GraphGenerator.create_heatmap(logs, start_date, end_date, view.selected_tasks)
-            title = "ヒートマップ"
-        elif view.chart_type == "punch":
-            buf = GraphGenerator.create_punch_card(logs, start_date, end_date, view.selected_tasks)
-            title = "パンチカード"
-        elif view.chart_type == "timeline":
-            buf = GraphGenerator.create_timeline_stack(logs, start_date, end_date, view.selected_tasks)
-            title = "タイムライン"
+        # グラフ生成ループ
+        generated_buffers = []
+        titles = []
+        
+        chart_types = view.selected_charts
+        if not chart_types: chart_types = ["pie"] # デフォルト
+
+        for c_type in chart_types:
+            buf = None
+            t_str = ""
+            if c_type == "pie":
+                buf = GraphGenerator.create_pie_chart(logs, start_date, end_date, view.selected_tasks)
+                t_str = "円グラフ"
+            elif c_type == "bar":
+                buf = GraphGenerator.create_bar_chart(logs, start_date, end_date, view.selected_tasks)
+                t_str = "棒グラフ"
+            elif c_type == "heatmap":
+                buf = GraphGenerator.create_heatmap(logs, start_date, end_date, view.selected_tasks)
+                t_str = "ヒートマップ"
+            elif c_type == "punch":
+                buf = GraphGenerator.create_punch_card(logs, start_date, end_date, view.selected_tasks)
+                t_str = "パンチカード"
+            elif c_type == "timeline":
+                buf = GraphGenerator.create_timeline_vertical(logs, start_date, end_date, view.selected_tasks)
+                t_str = "タイムライン"
             
-        if buf:
-            report_ch = await dm.get_report_channel(interaction.guild)
-            file = discord.File(buf, filename="report.png")
-            embed = discord.Embed(title=f"📊 {title}", color=discord.Color.purple())
-            p_str = view.period
-            if start_date: p_str = f"{start_date.strftime('%Y/%m/%d')} ~"
-            if end_date: p_str += f" {end_date.strftime('%Y/%m/%d')}"
+            if buf:
+                generated_buffers.append(buf)
+                titles.append(t_str)
+
+        if not generated_buffers:
+            await interaction.followup.send("対象データがありません。", ephemeral=True)
+            return
+
+        report_ch = await dm.get_report_channel(interaction.guild)
+        p_str = view.period
+        if start_date: p_str = f"{start_date.strftime('%Y/%m/%d')} ~"
+        if end_date: p_str += f" {end_date.strftime('%Y/%m/%d')}"
+
+        # 出力処理
+        if view.layout == "combined" and len(generated_buffers) > 1:
+            # 結合モード
+            combined_buf = GraphGenerator.combine_images(generated_buffers)
+            file = discord.File(combined_buf, filename="report_combined.png")
+            embed = discord.Embed(title=f"📊 統合レポート ({', '.join(titles)})", color=discord.Color.purple())
             embed.set_footer(text=f"期間: {p_str}")
-            embed.set_image(url="attachment://report.png")
+            embed.set_image(url="attachment://report_combined.png")
             
             if report_ch:
                 await report_ch.send(embed=embed, file=file)
                 await interaction.followup.send(f"✅ レポートを出力しました: {report_ch.mention}", ephemeral=True)
             else:
                 await interaction.followup.send(embed=embed, file=file)
-                
-            await resend_dashboard(interaction, view.bot)
         else:
-            await interaction.followup.send("対象データがありません。", ephemeral=True)
+            # 個別モード（または1枚のみの場合）
+            files = []
+            for i, buf in enumerate(generated_buffers):
+                files.append(discord.File(buf, filename=f"report_{i}.png"))
+            
+            # Embedは作らずファイルのみ送信、あるいは代表的なEmbedを1つ送る
+            # ここではシンプルにチャンネルへ送信
+            content = f"📊 **レポート出力** (期間: {p_str})"
+            if report_ch:
+                await report_ch.send(content=content, files=files)
+                await interaction.followup.send(f"✅ レポートを出力しました: {report_ch.mention}", ephemeral=True)
+            else:
+                await interaction.followup.send(content=content, files=files)
+
+        await resend_dashboard(interaction, view.bot)
 
 class GoalManagePanel(discord.ui.View):
     def __init__(self, bot, tasks):
