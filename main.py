@@ -90,11 +90,9 @@ async def resend_dashboard(interaction, bot):
     dm = DataManager(bot)
     tasks = await dm.load_tasks(interaction.guild)
     
-    # ダッシュボードチャンネルを特定、なければ現在のチャンネル
     dashboard_ch = discord.utils.get(interaction.guild.text_channels, name=CH_DASHBOARD)
     target_ch = dashboard_ch if dashboard_ch else interaction.channel
     
-    # 古いパネルを消す努力をする（直近のBotメッセージをチェック）
     try:
         async for msg in target_ch.history(limit=5):
             if msg.author == bot.user and msg.content == "行動宣言パネル":
@@ -102,7 +100,10 @@ async def resend_dashboard(interaction, bot):
     except:
         pass
 
-    await target_ch.send("行動宣言パネル", view=DashboardView(bot, tasks))
+    try:
+        await target_ch.send("行動宣言パネル", view=DashboardView(bot, tasks))
+    except Exception as e:
+        print(f"パネル再設置エラー: {e}")
 
 # ---------------------------------------------------------
 # 4. データ管理クラス
@@ -110,7 +111,6 @@ async def resend_dashboard(interaction, bot):
 class DataManager:
     def __init__(self, bot):
         self.bot = bot
-        # デフォルトタスク（絵文字なし、ジャンル別色分け）
         self.default_tasks = [
             {"name": "勉強", "style": "primary"},
             {"name": "読書", "style": "primary"},
@@ -963,26 +963,36 @@ class DashboardView(discord.ui.View):
     def __init__(self, bot, tasks):
         super().__init__(timeout=None)
         self.bot = bot
+        
+        # タスクボタンの配置 (2行分、6個まで)
         buttons_per_row = 3
-        max_task_rows = 3
-        max_buttons = buttons_per_row * max_task_rows
+        max_task_rows = 2 # 2行に制限 (Row 0, 1)
+        max_buttons = buttons_per_row * max_task_rows # 6個
+
         main_tasks = tasks[:max_buttons]
         overflow_tasks = tasks[max_buttons:]
+
         for i, task in enumerate(main_tasks):
             row = i // buttons_per_row
             self.add_item(TaskButton(task["name"], task.get("style", "secondary"), row=row))
-        if overflow_tasks:
-            self.add_item(OverflowTaskSelect(overflow_tasks, row=3))
-        self.add_item(self.create_func_btn("📝 自由入力", discord.ButtonStyle.secondary, "free_input", self.free_input_btn))
-        self.add_item(self.create_func_btn("📅 今日の記録", discord.ButtonStyle.secondary, "daily_today", self.daily_today_btn))
-        self.add_item(self.create_func_btn("📅 昨日の記録", discord.ButtonStyle.secondary, "daily_yesterday", self.daily_yesterday_btn))
-        self.add_item(self.create_func_btn("📊 レポート", discord.ButtonStyle.secondary, "report", self.report_btn))
-        self.add_item(self.create_func_btn("🔥 進捗", discord.ButtonStyle.primary, "progress", self.progress_btn))
-        self.add_item(self.create_func_btn("⚙️ 設定", discord.ButtonStyle.secondary, "manage", self.manage_btn))
-        self.add_item(self.create_func_btn("🔄 再設置", discord.ButtonStyle.gray, "refresh", self.refresh_btn))
 
-    def create_func_btn(self, label, style, custom_id_suffix, callback_func):
-        btn = discord.ui.Button(label=label, style=style, custom_id=f"dashboard_{custom_id_suffix}", row=4)
+        # あふれたタスク (Row 2)
+        if overflow_tasks:
+            self.add_item(OverflowTaskSelect(overflow_tasks, row=2))
+
+        # 機能ボタン群1 (Row 3 - 5個)
+        self.add_item(self.create_func_btn("📝 自由入力", discord.ButtonStyle.secondary, "free_input", self.free_input_btn, 3))
+        self.add_item(self.create_func_btn("📅 今日の記録", discord.ButtonStyle.secondary, "daily_today", self.daily_today_btn, 3))
+        self.add_item(self.create_func_btn("📅 昨日の記録", discord.ButtonStyle.secondary, "daily_yesterday", self.daily_yesterday_btn, 3))
+        self.add_item(self.create_func_btn("📊 レポート", discord.ButtonStyle.secondary, "report", self.report_btn, 3))
+        self.add_item(self.create_func_btn("🔥 進捗", discord.ButtonStyle.primary, "progress", self.progress_btn, 3))
+
+        # 機能ボタン群2 (Row 4 - 2個)
+        self.add_item(self.create_func_btn("⚙️ 設定", discord.ButtonStyle.secondary, "manage", self.manage_btn, 4))
+        self.add_item(self.create_func_btn("🔄 再設置", discord.ButtonStyle.gray, "refresh", self.refresh_btn, 4))
+
+    def create_func_btn(self, label, style, custom_id_suffix, callback_func, row):
+        btn = discord.ui.Button(label=label, style=style, custom_id=f"dashboard_{custom_id_suffix}", row=row)
         btn.callback = callback_func
         return btn
 
@@ -1340,34 +1350,72 @@ class FinishTaskView(discord.ui.View):
 @client.event
 async def on_ready():
     print(f'ログイン成功: {client.user}')
-    await client.tree.sync()
+    try:
+        await client.tree.sync()
+        print("コマンド同期完了")
+    except Exception as e:
+        print(f"コマンド同期エラー: {e}")
+        
     client.add_view(FinishTaskView())
     client.add_view(DashboardView(client, [{"name": "Loading...", "style": "secondary"}]))
 
-@client.tree.command(name="setup_server", description="サーバー構成を自動セットアップします")
+@client.tree.command(name="setup_server", description="【推奨】サーバーのチャンネル構成を自動セットアップします")
 async def setup_server(interaction: discord.Interaction):
-    await interaction.response.defer()
-    guild = interaction.guild
-    category = discord.utils.get(guild.categories, name=CAT_NAME)
-    if not category: category = await guild.create_category(CAT_NAME)
-    dash_ch = await DataManager(client).get_channel_by_name(guild, CH_DASHBOARD, category)
-    await DataManager(client).get_channel_by_name(guild, CH_TIMELINE, category)
-    await DataManager(client).get_channel_by_name(guild, CH_GOALS, category)
-    await DataManager(client).get_channel_by_name(guild, CH_REPORT, category)
-    await DataManager(client).get_channel_by_name(guild, CH_DATA, category, hidden=True)
-    dm = DataManager(client)
-    tasks = await dm.load_tasks(guild)
-    await dash_ch.purge(limit=5)
-    await dash_ch.send("行動宣言パネル", view=DashboardView(client, tasks))
-    await dm.refresh_goals_panel(guild)
-    await interaction.followup.send("✅ 完了しました！", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.followup.send("⚠️ このコマンドはサーバー内でのみ使用できます。")
+            return
 
-@client.tree.command(name="setup", description="パネルを設置します")
+        # 1. カテゴリ作成
+        category = discord.utils.get(guild.categories, name=CAT_NAME)
+        if not category:
+            category = await guild.create_category(CAT_NAME)
+
+        # 2. 各チャンネルの準備 (DataManager経由)
+        dm = DataManager(client)
+        # ダッシュボード
+        dash_ch = await dm.get_channel_by_name(guild, CH_DASHBOARD, category)
+        # その他チャンネル
+        await dm.get_channel_by_name(guild, CH_TIMELINE, category)
+        await dm.get_channel_by_name(guild, CH_GOALS, category)
+        await dm.get_channel_by_name(guild, CH_REPORT, category)
+        await dm.get_channel_by_name(guild, CH_DATA, category, hidden=True)
+        
+        # 3. パネル設置
+        tasks = await dm.load_tasks(guild)
+        
+        # 既存メッセージの削除
+        try:
+            await dash_ch.purge(limit=5)
+        except discord.Forbidden:
+            await interaction.followup.send("⚠️ メッセージ削除の権限がありませんでした（動作に影響はありません）。", ephemeral=True)
+        except Exception:
+            pass
+
+        await dash_ch.send("行動宣言パネル", view=DashboardView(client, tasks))
+        
+        # 4. 目標パネル更新
+        await dm.refresh_goals_panel(guild)
+
+        await interaction.followup.send("✅ 完了しました！すべてのチャンネルがセットアップされました。", ephemeral=True)
+
+    except discord.Forbidden as e:
+        await interaction.followup.send(f"🚫 **権限エラーが発生しました**\nBotに「チャンネルの管理」や「管理者(Administrator)」の権限がありません。\nエラー詳細: {e}", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ **予期せぬエラーが発生しました**\nエラー詳細: {e}", ephemeral=True)
+
+@client.tree.command(name="setup", description="現在のチャンネルにパネルを設置します")
 async def setup(interaction: discord.Interaction):
     await interaction.response.defer()
-    dm = DataManager(client)
-    tasks = await dm.load_tasks(interaction.guild)
-    await interaction.followup.send("行動宣言パネル", view=DashboardView(client, tasks))
+    try:
+        dm = DataManager(client)
+        tasks = await dm.load_tasks(interaction.guild)
+        await interaction.followup.send("行動宣言パネル", view=DashboardView(client, tasks))
+    except Exception as e:
+        await interaction.followup.send(f"エラーが発生しました: {e}")
 
 keep_alive()
 client.run(TOKEN)
